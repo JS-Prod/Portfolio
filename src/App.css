@@ -26,6 +26,7 @@
 
 .hud-header,
 .hud-panel,
+.neutral-reset,
 .project-rail,
 .interaction-hint,
 .active-readout {
@@ -73,6 +74,36 @@
   top: 1.1rem;
   right: 1.1rem;
   width: min(26.5rem, calc(100vw - 2.2rem));
+}
+
+.neutral-reset {
+  top: 0.7rem;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 1.55rem;
+  height: 1.55rem;
+  border-radius: 999px;
+  border: 1px solid rgba(156, 195, 243, 0.24);
+  background: rgba(6, 12, 22, 0.42);
+  color: rgba(229, 240, 255, 0.72);
+  font-size: 0.82rem;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  transition: border-color 160ms ease, color 160ms ease, background 160ms ease;
+}
+
+.neutral-reset:hover {
+  border-color: rgba(182, 214, 255, 0.48);
+  color: rgba(244, 250, 255, 0.95);
+  background: rgba(8, 16, 28, 0.62);
+}
+
+.neutral-reset:focus-visible {
+  outline: 2px solid rgba(162, 206, 255, 0.72);
+  outline-offset: 2px;
 }
 
 .project-panel {
@@ -270,6 +301,10 @@
     right: 0.75rem;
     bottom: 5.15rem;
     width: auto;
+  }
+
+  .neutral-reset {
+    top: 0.5rem;
   }
 
   .project-panel {

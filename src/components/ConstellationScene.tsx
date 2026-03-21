@@ -1,8 +1,9 @@
-import { Html, Line, OrbitControls, Sparkles, Stars } from '@react-three/drei'
+import { Html, Line, OrbitControls, Stars } from '@react-three/drei'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import * as THREE from 'three'
+import { EffectComposer, RenderPass, UnrealBloomPass } from 'three-stdlib'
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 
 import type { Project } from '../data/projects'
@@ -11,8 +12,8 @@ type Vector3 = [number, number, number]
 
 type ConstellationSceneProps = {
   projects: Project[]
-  activeProjectId: string
-  onSelectProject: (projectId: string) => void
+  activeProjectId: string | null
+  onSelectProject: (projectId: string | null) => void
   reducedMotion: boolean
 }
 
@@ -26,50 +27,176 @@ type ProjectNodeProps = {
   project: Project
   isActive: boolean
   isHovered: boolean
+  mapVisibility: number
+  nodeDisplayMode: 'neutral' | 'background'
   reducedMotion: boolean
   onHover: (projectId: string | null) => void
-  onSelect: (projectId: string) => void
-}
-
-type SignatureProfile = {
-  starKind: 'core' | 'crystal' | 'knot'
-  particleKind: 'burst' | 'helix' | 'rays'
-  accent: string
-  secondaryAccent: string
-  primaryCount: number
-  secondaryCount: number
-  primarySize: number
-  secondarySize: number
-}
-
-type ParticleLayer = {
-  basePositions: Float32Array
-  positions: Float32Array
-  phases: Float32Array
-  speeds: Float32Array
-  radii: Float32Array
-  count: number
-}
-
-type SignatureParticles = {
-  primary: ParticleLayer
-  secondary: ParticleLayer
-}
-
-type ProjectSignatureProps = {
-  project: Project
-  reducedMotion: boolean
+  onSelect: (projectId: string | null) => void
 }
 
 type CameraRigProps = {
   projects: Project[]
-  activeProject: Project
+  activeProject: Project | null
   controlsRef: RefObject<OrbitControlsImpl | null>
   reducedMotion: boolean
   onTransitionHalfway?: () => void
+  onTransitionProgress?: (progress: number) => void
+}
+
+type HeroKind = 'storm' | 'harmonic' | 'pulse'
+
+type HeroStyle = {
+  kind: HeroKind
+  accent: string
+  secondary: string
+  swarmCount: number
+  swarmSize: number
+  shellScale: number
+}
+
+type HeroParticleField = {
+  positions: Float32Array
+  basePositions: Float32Array
+  speeds: Float32Array
+  phases: Float32Array
+  radii: Float32Array
+  sizes: Float32Array
+  flickers: Float32Array
+  count: number
+}
+
+type HeroWorldProps = {
+  project: Project
+  reducedMotion: boolean
+  transitionProgress: number
+}
+
+type CinematicBloomProps = {
+  project: Project | null
+  reducedMotion: boolean
 }
 
 const CONNECTION_DISTANCE = 6.2
+const WORLD_UP = new THREE.Vector3(0, 1, 0)
+const X_AXIS = new THREE.Vector3(1, 0, 0)
+
+const CORE_VERTEX_SHADER = `
+varying vec3 vNormal;
+varying vec3 vWorldPos;
+
+void main() {
+  vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+  vWorldPos = worldPosition.xyz;
+  vNormal = normalize(normalMatrix * normal);
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`
+
+const CORE_FRAGMENT_SHADER = `
+uniform vec3 uColor;
+uniform float uTime;
+uniform float uIntensity;
+uniform float uEnergy;
+
+varying vec3 vNormal;
+varying vec3 vWorldPos;
+
+void main() {
+  vec3 normal = normalize(vNormal);
+  vec3 viewDir = normalize(cameraPosition - vWorldPos);
+  float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 2.4);
+  float wave = sin(vWorldPos.x * 3.1 + uTime * 1.35) *
+               sin(vWorldPos.y * 2.8 - uTime * 1.22) *
+               sin(vWorldPos.z * 3.3 + uTime * 1.15);
+
+  float pulse = 0.58 + sin(uTime * 2.1) * 0.14 + wave * 0.12;
+  vec3 color = uColor * (0.46 + pulse * 0.44 + fresnel * (0.22 + uEnergy * 0.62));
+  float alpha = clamp((0.12 + fresnel * 0.36) * uIntensity, 0.0, 1.0);
+
+  gl_FragColor = vec4(color, alpha);
+}
+`
+
+const SHELL_VERTEX_SHADER = `
+varying vec3 vNormal;
+varying vec3 vWorldPos;
+
+void main() {
+  vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+  vWorldPos = worldPosition.xyz;
+  vNormal = normalize(normalMatrix * normal);
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`
+
+const SHELL_FRAGMENT_SHADER = `
+uniform vec3 uColor;
+uniform float uTime;
+uniform float uIntensity;
+
+varying vec3 vNormal;
+varying vec3 vWorldPos;
+
+void main() {
+  vec3 normal = normalize(vNormal);
+  vec3 viewDir = normalize(cameraPosition - vWorldPos);
+
+  float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 1.9);
+  float edge = pow(fresnel, 2.4);
+  float scan = 0.5 + 0.5 * sin((vWorldPos.y + uTime * 1.65) * 10.5);
+  float shell = smoothstep(0.2, 1.0, fresnel) * (0.44 + scan * 0.56);
+
+  vec3 color = uColor * (0.42 + scan * 0.58 + edge * 0.3);
+  gl_FragColor = vec4(color, shell * (0.22 + edge * 0.12) * uIntensity);
+}
+`
+
+const PARTICLE_VERTEX_SHADER = `
+attribute float aSize;
+attribute float aFlicker;
+
+uniform float uTime;
+uniform float uBaseSize;
+uniform float uPixelRatio;
+uniform float uIntensity;
+
+varying float vPulse;
+varying float vDepthFade;
+
+void main() {
+  vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+  float twinkle = sin(uTime * (1.2 + aFlicker * 2.4) + aFlicker * 23.0) * 0.5 + 0.5;
+  vPulse = twinkle;
+  vDepthFade = clamp(1.0 - (-mvPosition.z / 26.0), 0.0, 1.0);
+  float size = (uBaseSize * aSize * (0.42 + twinkle * 0.78) * uPixelRatio * uIntensity) / max(0.08, -mvPosition.z);
+  gl_PointSize = size;
+  gl_Position = projectionMatrix * mvPosition;
+}
+`
+
+const PARTICLE_FRAGMENT_SHADER = `
+uniform vec3 uColor;
+uniform float uOpacity;
+
+varying float vPulse;
+varying float vDepthFade;
+
+void main() {
+  vec2 centered = gl_PointCoord * 2.0 - 1.0;
+  float distanceSquared = dot(centered, centered);
+
+  if (distanceSquared > 1.0) {
+    discard;
+  }
+
+  float falloff = exp(-distanceSquared * 3.25);
+  float edge = smoothstep(1.0, 0.0, distanceSquared);
+  float glow = falloff * edge * (0.45 + vPulse * 0.5) * (0.52 + vDepthFade * 0.48);
+  vec3 color = uColor * (0.74 + vPulse * 0.2);
+
+  gl_FragColor = vec4(color, glow * uOpacity);
+}
+`
 
 function getHash(seed: string): number {
   let hash = 0
@@ -94,38 +221,20 @@ function createRandom(seed: number) {
   }
 }
 
-function createParticleTexture() {
-  const canvas = document.createElement('canvas')
-  canvas.width = 128
-  canvas.height = 128
+function clamp01(value: number) {
+  return THREE.MathUtils.clamp(value, 0, 1)
+}
 
-  const context = canvas.getContext('2d')
-
-  if (!context) {
-    return new THREE.Texture()
+function smoothstep(edge0: number, edge1: number, value: number) {
+  if (edge0 === edge1) {
+    return value < edge0 ? 0 : 1
   }
 
-  const gradient = context.createRadialGradient(64, 64, 6, 64, 64, 64)
-  gradient.addColorStop(0, 'rgba(255,255,255,1)')
-  gradient.addColorStop(0.2, 'rgba(255,255,255,0.95)')
-  gradient.addColorStop(0.5, 'rgba(180,215,255,0.55)')
-  gradient.addColorStop(1, 'rgba(0,0,0,0)')
-
-  context.fillStyle = gradient
-  context.fillRect(0, 0, 128, 128)
-
-  const texture = new THREE.CanvasTexture(canvas)
-  texture.colorSpace = THREE.SRGBColorSpace
-  texture.needsUpdate = true
-
-  return texture
+  const normalized = clamp01((value - edge0) / (edge1 - edge0))
+  return normalized * normalized * (3 - 2 * normalized)
 }
 
-function getPhase(seed: string): number {
-  return (getHash(seed) % 628) / 100
-}
-
-function easeInOutCubic(value: number): number {
+function easeInOutCubic(value: number) {
   return value < 0.5 ? 4 * value * value * value : 1 - ((-2 * value + 2) ** 3) / 2
 }
 
@@ -151,95 +260,85 @@ function buildConnections(projects: Project[]): Connection[] {
   return connections
 }
 
-function getSignatureProfile(project: Project): SignatureProfile {
+function getHeroStyle(project: Project): HeroStyle {
+  const accent = new THREE.Color(project.color)
+  const hsl = { h: 0, s: 0, l: 0 }
+  accent.getHSL(hsl)
+
+  const secondary = new THREE.Color().setHSL(hsl.h, Math.min(1, hsl.s * 0.88), Math.max(0.15, hsl.l * 0.42))
+
   if (project.id === 'gpgpu-particles') {
     return {
-      starKind: 'core',
-      particleKind: 'burst',
-      accent: '#8dc9ff',
-      secondaryAccent: '#3f79d6',
-      primaryCount: 920,
-      secondaryCount: 520,
-      primarySize: 0.048,
-      secondarySize: 0.078,
+      kind: 'storm',
+      accent: `#${accent.getHexString()}`,
+      secondary: `#${secondary.getHexString()}`,
+      swarmCount: 920,
+      swarmSize: 32,
+      shellScale: 0.78,
     }
   }
 
   if (project.id === 'voyce') {
     return {
-      starKind: 'knot',
-      particleKind: 'helix',
-      accent: '#8ff2d7',
-      secondaryAccent: '#58c9af',
-      primaryCount: 760,
-      secondaryCount: 420,
-      primarySize: 0.044,
-      secondarySize: 0.074,
+      kind: 'harmonic',
+      accent: `#${accent.getHexString()}`,
+      secondary: `#${secondary.getHexString()}`,
+      swarmCount: 840,
+      swarmSize: 30,
+      shellScale: 0.83,
     }
   }
 
   return {
-    starKind: 'crystal',
-    particleKind: 'rays',
-    accent: '#ffd29f',
-    secondaryAccent: '#d79652',
-    primaryCount: 780,
-    secondaryCount: 460,
-    primarySize: 0.05,
-    secondarySize: 0.082,
+    kind: 'pulse',
+    accent: `#${accent.getHexString()}`,
+    secondary: `#${secondary.getHexString()}`,
+    swarmCount: 880,
+    swarmSize: 34,
+    shellScale: 0.8,
   }
 }
 
-function getSignatureFocusRadius(project: Project): number {
-  const profile = getSignatureProfile(project)
-
-  if (profile.starKind === 'core') {
-    return 0.88
-  }
-
-  if (profile.starKind === 'knot') {
-    return 0.82
-  }
-
-  return 0.8
-}
-
-function createParticleLayer(profile: SignatureProfile, seed: string, count: number): ParticleLayer {
-  const basePositions = new Float32Array(count * 3)
+function createParticleField(style: HeroStyle, seed: string): HeroParticleField {
+  const count = style.swarmCount
   const positions = new Float32Array(count * 3)
-  const phases = new Float32Array(count)
+  const basePositions = new Float32Array(count * 3)
   const speeds = new Float32Array(count)
+  const phases = new Float32Array(count)
   const radii = new Float32Array(count)
-
+  const sizes = new Float32Array(count)
+  const flickers = new Float32Array(count)
   const random = createRandom(getHash(seed) + count)
 
   for (let index = 0; index < count; index += 1) {
     const offset = index * 3
     const angle = random() * Math.PI * 2
+    const t = index / Math.max(count - 1, 1)
 
     phases[index] = random() * Math.PI * 2
-    speeds[index] = 0.65 + random() * 1.5
-    radii[index] = 0.25 + random() * 1.7
+    speeds[index] = 0.35 + random() * 0.85
+    flickers[index] = random()
+    sizes[index] = 0.78 + random() * 1.3
 
-    if (profile.particleKind === 'burst') {
+    if (style.kind === 'storm') {
       const phi = Math.acos(1 - 2 * random())
+      const spread = 0.24 + Math.pow(random(), 1.1) * 2.25
       basePositions[offset] = Math.sin(phi) * Math.cos(angle)
       basePositions[offset + 1] = Math.cos(phi)
       basePositions[offset + 2] = Math.sin(phi) * Math.sin(angle)
-      radii[index] = 0.8 + random() * 2.4
-    } else if (profile.particleKind === 'helix') {
-      const t = index / Math.max(count - 1, 1)
-      const turns = 8.8
+      radii[index] = spread
+    } else if (style.kind === 'harmonic') {
+      const turns = 8.2
       const helixAngle = t * Math.PI * turns + random() * 0.35
-      const radius = 0.58 + random() * 0.78
+      const radius = 0.24 + random() * 1.1
       basePositions[offset] = Math.cos(helixAngle) * radius
-      basePositions[offset + 1] = (t - 0.5) * 4.2 + (random() - 0.5) * 0.3
+      basePositions[offset + 1] = (t - 0.5) * 4.1 + (random() - 0.5) * 0.2
       basePositions[offset + 2] = Math.sin(helixAngle) * radius
-      radii[index] = radius * (1.1 + random() * 0.5)
+      radii[index] = radius
     } else {
-      const spread = 0.6 + random() * 1.8
+      const spread = 0.16 + Math.pow(random(), 1.15) * 2.6
       basePositions[offset] = Math.cos(angle) * spread
-      basePositions[offset + 1] = (random() - 0.5) * 1.15 * spread * 0.45
+      basePositions[offset + 1] = (random() - 0.5) * spread * 0.42
       basePositions[offset + 2] = Math.sin(angle) * spread
       radii[index] = spread
     }
@@ -248,77 +347,127 @@ function createParticleLayer(profile: SignatureProfile, seed: string, count: num
   positions.set(basePositions)
 
   return {
-    basePositions,
     positions,
-    phases,
+    basePositions,
     speeds,
+    phases,
     radii,
+    sizes,
+    flickers,
     count,
   }
 }
 
-function createSignatureParticles(profile: SignatureProfile, seed: string): SignatureParticles {
-  return {
-    primary: createParticleLayer(profile, `${seed}-primary`, profile.primaryCount),
-    secondary: createParticleLayer(profile, `${seed}-secondary`, profile.secondaryCount),
+function updateParticleField(field: HeroParticleField, style: HeroStyle, elapsed: number, intensity: number) {
+  const smoothing = 0.12 + intensity * 0.08
+
+  for (let index = 0; index < field.count; index += 1) {
+    const offset = index * 3
+
+    const bx = field.basePositions[offset]
+    const by = field.basePositions[offset + 1]
+    const bz = field.basePositions[offset + 2]
+
+    const phase = field.phases[index]
+    const speed = field.speeds[index]
+    const radius = field.radii[index]
+
+    if (style.kind === 'storm') {
+      const spin = elapsed * 0.2 * speed + phase
+      const pulse = 0.8 + Math.abs(Math.sin(elapsed * 0.6 + phase)) * (0.42 + intensity * 0.5)
+      const wave = Math.sin(elapsed * 0.85 + phase) * 0.1
+      const radial = radius * pulse
+
+      const targetX = Math.cos(spin) * radial + wave
+      const targetY = by * radial + Math.sin(elapsed * 0.8 + phase) * 0.16
+      const targetZ = Math.sin(spin) * radial + Math.cos(elapsed * 0.7 + phase) * 0.08
+
+      field.positions[offset] = THREE.MathUtils.lerp(field.positions[offset], targetX, smoothing)
+      field.positions[offset + 1] = THREE.MathUtils.lerp(field.positions[offset + 1], targetY, smoothing)
+      field.positions[offset + 2] = THREE.MathUtils.lerp(field.positions[offset + 2], targetZ, smoothing)
+      continue
+    }
+
+    if (style.kind === 'harmonic') {
+      const spin = elapsed * 0.58 * speed + phase
+      const baseRadius = Math.max(Math.sqrt(bx * bx + bz * bz), 0.08)
+      const wobble = Math.sin(elapsed * 1.0 + phase) * (0.12 + intensity * 0.1)
+      const drift = 0.08 + Math.sin(elapsed * 0.7 + phase) * 0.1
+
+      const targetX = Math.cos(spin) * (baseRadius + drift)
+      const targetY = by + wobble
+      const targetZ = Math.sin(spin) * (baseRadius + drift)
+
+      field.positions[offset] = THREE.MathUtils.lerp(field.positions[offset], targetX, smoothing)
+      field.positions[offset + 1] = THREE.MathUtils.lerp(field.positions[offset + 1], targetY, smoothing)
+      field.positions[offset + 2] = THREE.MathUtils.lerp(field.positions[offset + 2], targetZ, smoothing)
+      continue
+    }
+
+    const beat = 0.84 + (Math.sin(elapsed * 0.95 + phase) * 0.5 + 0.5) * (0.42 + intensity * 0.36)
+    const spin = elapsed * 0.18 * speed
+    const cos = Math.cos(spin)
+    const sin = Math.sin(spin)
+    const sx = bx * cos - bz * sin
+    const sz = bx * sin + bz * cos
+
+    const targetX = sx * beat
+    const targetY = by * (0.82 + beat * 0.34) + Math.sin(elapsed * 0.85 + phase) * 0.07
+    const targetZ = sz * beat
+
+    field.positions[offset] = THREE.MathUtils.lerp(field.positions[offset], targetX, smoothing)
+    field.positions[offset + 1] = THREE.MathUtils.lerp(field.positions[offset + 1], targetY, smoothing)
+    field.positions[offset + 2] = THREE.MathUtils.lerp(field.positions[offset + 2], targetZ, smoothing)
   }
 }
 
-function updateParticleLayer(layer: ParticleLayer, profile: SignatureProfile, elapsed: number) {
-  for (let index = 0; index < layer.count; index += 1) {
-    const offset = index * 3
+function createCirclePoints(radius: number, segments: number, tilt = 0): Vector3[] {
+  const points: Vector3[] = []
 
-    const bx = layer.basePositions[offset]
-    const by = layer.basePositions[offset + 1]
-    const bz = layer.basePositions[offset + 2]
-
-    const phase = layer.phases[index]
-    const speed = layer.speeds[index]
-    const radius = layer.radii[index]
-
-    if (profile.particleKind === 'burst') {
-      const pulse = 1 + Math.sin(elapsed * 1.8 * speed + phase) * 0.34
-      const spin = elapsed * 0.28 * speed
-      const cos = Math.cos(spin)
-      const sin = Math.sin(spin)
-
-      const sx = bx * cos - bz * sin
-      const sz = bx * sin + bz * cos
-
-      layer.positions[offset] = sx * radius * pulse + Math.sin(elapsed * speed + phase) * 0.1
-      layer.positions[offset + 1] = by * radius * pulse + Math.cos(elapsed * 1.35 + phase) * 0.1
-      layer.positions[offset + 2] = sz * radius * pulse + Math.sin(elapsed * 1.15 + phase) * 0.1
-    } else if (profile.particleKind === 'helix') {
-      const spin = elapsed * 1.05 * speed + phase
-      const baseRadius = Math.max(Math.sqrt(bx * bx + bz * bz), 0.08)
-      const drift = 0.16 + Math.sin(elapsed * 1.3 + phase) * 0.13
-      const verticalWave = Math.sin(elapsed * 0.95 + phase) * 0.28
-
-      layer.positions[offset] = Math.cos(spin) * (baseRadius + drift)
-      layer.positions[offset + 1] = by + verticalWave
-      layer.positions[offset + 2] = Math.sin(spin) * (baseRadius + drift)
-    } else {
-      const wave = 0.62 + Math.abs(Math.sin(elapsed * 1.65 * speed + phase)) * 0.7
-      layer.positions[offset] = bx * wave
-      layer.positions[offset + 1] = by * wave
-      layer.positions[offset + 2] = bz * wave
-    }
+  for (let index = 0; index <= segments; index += 1) {
+    const t = (index / segments) * Math.PI * 2
+    const x = Math.cos(t) * radius
+    const z = Math.sin(t) * radius
+    const y = Math.sin(t * 2.0) * tilt
+    points.push([x, y, z])
   }
+
+  return points
+}
+
+function getFocusRadius(project: Project) {
+  const style = getHeroStyle(project)
+
+  if (style.kind === 'harmonic') {
+    return 0.94
+  }
+
+  if (style.kind === 'pulse') {
+    return 0.9
+  }
+
+  return 0.96
 }
 
 function ProjectNode({
   project,
   isActive,
   isHovered,
+  mapVisibility,
+  nodeDisplayMode,
   reducedMotion,
   onHover,
   onSelect,
 }: ProjectNodeProps) {
   const groupRef = useRef<THREE.Group>(null)
   const ringRef = useRef<THREE.Mesh>(null)
-  const scaleRef = useMemo(() => new THREE.Vector3(1, 1, 1), [])
-  const ringScaleRef = useMemo(() => new THREE.Vector3(1, 1, 1), [])
-  const phaseOffset = useMemo(() => getPhase(project.id), [project.id])
+  const outerRingRef = useRef<THREE.Mesh>(null)
+  const nodeMaterialRef = useRef<THREE.MeshStandardMaterial>(null)
+  const ringMaterialRef = useRef<THREE.MeshBasicMaterial>(null)
+  const outerRingMaterialRef = useRef<THREE.MeshBasicMaterial>(null)
+  const scaleTargetRef = useMemo(() => new THREE.Vector3(1, 1, 1), [])
+  const neutralBlendRef = useRef(nodeDisplayMode === 'neutral' ? 1 : 0)
+  const phaseOffset = useMemo(() => (getHash(project.id) % 628) / 100, [project.id])
 
   useEffect(() => {
     return () => {
@@ -333,62 +482,101 @@ function ProjectNode({
 
     const elapsed = clock.getElapsedTime()
     const [x, y, z] = project.coordinates
-
-    const drift = reducedMotion ? 0 : Math.sin(elapsed * 0.72 + phaseOffset) * 0.14
-    const pulse = reducedMotion ? 0 : Math.sin(elapsed * 1.9 + phaseOffset) * 0.04
-
-    const scaleTarget = isActive ? 0.82 : isHovered ? 1.14 : 1
-    const ringTarget = isHovered ? 1.72 : 1.38
+    const drift = reducedMotion ? 0 : Math.sin(elapsed * 0.7 + phaseOffset) * 0.1
+    const neutralTarget = nodeDisplayMode === 'neutral' && !isActive ? 1 : 0
+    neutralBlendRef.current = THREE.MathUtils.lerp(
+      neutralBlendRef.current,
+      neutralTarget,
+      reducedMotion ? 0.2 : 0.08,
+    )
+    const neutralBlend = neutralBlendRef.current
+    const pulseAmplitude = THREE.MathUtils.lerp(0.024, 0.048, neutralBlend)
+    const pulse = reducedMotion ? 0 : Math.sin(elapsed * 2 + phaseOffset) * pulseAmplitude
 
     groupRef.current.position.set(x, y + drift, z)
 
-    scaleRef.setScalar(scaleTarget + pulse)
-    groupRef.current.scale.lerp(scaleRef, 0.1)
+    const baseScale = THREE.MathUtils.lerp(0.88, 1.26, neutralBlend)
+    const hoverScale = isHovered ? THREE.MathUtils.lerp(0.1, 0.16, neutralBlend) : 0
+    const targetScale = baseScale + hoverScale
+    scaleTargetRef.setScalar(targetScale + pulse)
+    groupRef.current.scale.lerp(scaleTargetRef, 0.1)
 
     if (ringRef.current) {
-      ringScaleRef.setScalar(ringTarget + pulse)
-      ringRef.current.scale.lerp(ringScaleRef, 0.1)
-      ringRef.current.rotation.z += reducedMotion ? 0 : 0.005
+      ringRef.current.rotation.z += reducedMotion ? 0 : THREE.MathUtils.lerp(0.0032, 0.0048, neutralBlend)
+    }
+
+    if (outerRingRef.current) {
+      outerRingRef.current.rotation.z -= reducedMotion ? 0 : THREE.MathUtils.lerp(0.0024, 0.0038, neutralBlend)
+    }
+
+    if (nodeMaterialRef.current) {
+      const baseOpacity = isHovered ? 0.74 : 0.62
+      const neutralOpacityBoost = isHovered ? 0.2 : 0.16
+      const baseEmissive = isHovered ? 0.42 : 0.3
+      const neutralEmissiveBoost = isHovered ? 0.32 : 0.24
+
+      nodeMaterialRef.current.opacity = mapVisibility * (baseOpacity + neutralBlend * neutralOpacityBoost)
+      nodeMaterialRef.current.emissiveIntensity = mapVisibility * (baseEmissive + neutralBlend * neutralEmissiveBoost)
+    }
+
+    if (ringMaterialRef.current) {
+      const baseRingOpacity = isHovered ? 0.2 : 0.12
+      const neutralRingBoost = isHovered ? 0.28 : 0.24
+      ringMaterialRef.current.opacity = mapVisibility * (baseRingOpacity + neutralBlend * neutralRingBoost)
+    }
+
+    if (outerRingMaterialRef.current) {
+      const outerOpacity = isHovered ? 0.24 : 0.16
+      outerRingMaterialRef.current.opacity = mapVisibility * outerOpacity * neutralBlend
     }
   })
 
   return (
     <group ref={groupRef}>
       {!isActive && (
-        <mesh ref={ringRef}>
-          <torusGeometry args={[0.24, 0.018, 10, 64]} />
-          <meshBasicMaterial color={project.color} transparent opacity={isHovered ? 0.45 : 0.2} />
-        </mesh>
+        <>
+          <mesh ref={ringRef}>
+            <torusGeometry args={[0.31, 0.014, 12, 80]} />
+            <meshBasicMaterial ref={ringMaterialRef} color={project.color} transparent depthWrite={false} />
+          </mesh>
+
+          <mesh ref={outerRingRef} rotation={[Math.PI * 0.32, 0, 0]}>
+            <torusGeometry args={[0.43, 0.01, 12, 80]} />
+            <meshBasicMaterial ref={outerRingMaterialRef} color={project.color} transparent depthWrite={false} />
+          </mesh>
+
+          <mesh
+            onPointerOver={(event) => {
+              event.stopPropagation()
+              document.body.style.cursor = 'pointer'
+              onHover(project.id)
+            }}
+            onPointerOut={(event) => {
+              event.stopPropagation()
+              document.body.style.cursor = 'default'
+              onHover(null)
+            }}
+            onClick={(event) => {
+              event.stopPropagation()
+              onSelect(project.id)
+            }}
+          >
+            <icosahedronGeometry args={[0.25, 1]} />
+            <meshStandardMaterial
+              ref={nodeMaterialRef}
+              color={project.color}
+              emissive={project.color}
+              roughness={0.3}
+              metalness={0.2}
+              transparent
+              depthWrite={false}
+            />
+          </mesh>
+        </>
       )}
 
-      <mesh
-        onPointerOver={(event) => {
-          event.stopPropagation()
-          document.body.style.cursor = 'pointer'
-          onHover(project.id)
-        }}
-        onPointerOut={(event) => {
-          event.stopPropagation()
-          document.body.style.cursor = 'default'
-          onHover(null)
-        }}
-        onClick={(event) => {
-          event.stopPropagation()
-          onSelect(project.id)
-        }}
-      >
-        <icosahedronGeometry args={[isActive ? 0.16 : 0.2, 1]} />
-        <meshStandardMaterial
-          color={isActive ? '#dce8ff' : project.color}
-          emissive={project.color}
-          emissiveIntensity={isActive ? 0.38 : isHovered ? 0.66 : 0.34}
-          roughness={0.28}
-          metalness={0.2}
-        />
-      </mesh>
-
-      {isHovered && !isActive && (
-        <Html position={[0, 0.86, 0]} center distanceFactor={12} zIndexRange={[20, 0]}>
+      {isHovered && mapVisibility > 0.2 && !isActive && (
+        <Html position={[0, 0.8, 0]} center distanceFactor={12} zIndexRange={[30, 0]}>
           <div className="node-label">{project.title}</div>
         </Html>
       )}
@@ -396,185 +584,314 @@ function ProjectNode({
   )
 }
 
-function ProjectSignature({ project, reducedMotion }: ProjectSignatureProps) {
+function HeroWorld({ project, reducedMotion, transitionProgress }: HeroWorldProps) {
+  const { gl } = useThree()
   const groupRef = useRef<THREE.Group>(null)
-  const starRef = useRef<THREE.Mesh>(null)
+  const coreRef = useRef<THREE.Mesh>(null)
   const shellRef = useRef<THREE.Mesh>(null)
-  const pointsPrimaryRef = useRef<THREE.Points>(null)
-  const pointsSecondaryRef = useRef<THREE.Points>(null)
+  const shellAccentRef = useRef<THREE.Mesh>(null)
+  const pointsRef = useRef<THREE.Points>(null)
+  const coreMaterialRef = useRef<THREE.ShaderMaterial>(null)
+  const shellMaterialRef = useRef<THREE.ShaderMaterial>(null)
+  const particleMaterialRef = useRef<THREE.ShaderMaterial>(null)
+  const accentScaleTargetRef = useMemo(() => new THREE.Vector3(1, 1, 1), [])
 
-  const profile = useMemo(() => getSignatureProfile(project), [project])
-  const particles = useMemo(() => createSignatureParticles(profile, project.id), [profile, project.id])
-  const particleTexture = useMemo(() => createParticleTexture(), [])
+  const style = useMemo(() => getHeroStyle(project), [project])
+  const particles = useMemo(() => createParticleField(style, `${project.id}-hero-swarm`), [style, project.id])
+  const accentColor = useMemo(() => new THREE.Color(style.accent), [style.accent])
+  const secondaryColor = useMemo(() => new THREE.Color(style.secondary), [style.secondary])
 
-  useEffect(() => {
-    return () => {
-      particleTexture.dispose()
-    }
-  }, [particleTexture])
+  const introProgress = transitionProgress < 0.5 ? 1 - smoothstep(0, 0.5, transitionProgress) : smoothstep(0.5, 1, transitionProgress)
+  const intensity = reducedMotion ? 1 : clamp01(introProgress)
+
+  const coreUniforms = useMemo(
+    () => ({
+      uTime: { value: 0 },
+      uColor: { value: accentColor.clone() },
+      uIntensity: { value: 1 },
+      uEnergy: { value: 1 },
+    }),
+    [accentColor],
+  )
+
+  const shellUniforms = useMemo(
+    () => ({
+      uTime: { value: 0 },
+      uColor: { value: secondaryColor.clone() },
+      uIntensity: { value: 1 },
+    }),
+    [secondaryColor],
+  )
+
+  const particleUniforms = useMemo(
+    () => ({
+      uTime: { value: 0 },
+      uColor: { value: accentColor.clone().lerp(secondaryColor, 0.14) },
+      uOpacity: { value: 0.44 },
+      uBaseSize: { value: style.swarmSize },
+      uPixelRatio: { value: Math.min(gl.getPixelRatio(), 2) },
+      uIntensity: { value: 1 },
+    }),
+    [accentColor, secondaryColor, gl, style.swarmSize],
+  )
+
+  const harmonicRingA = useMemo(() => createCirclePoints(1.12, 128, 0.06), [])
+  const harmonicRingB = useMemo(() => createCirclePoints(0.84, 128, 0.04), [])
 
   useFrame(({ clock }) => {
     const elapsed = clock.getElapsedTime()
 
-    if (groupRef.current && !reducedMotion) {
-      groupRef.current.rotation.y += 0.0028
+    if (groupRef.current) {
+      const targetScale = 0.72 + intensity * 0.36
+      groupRef.current.scale.lerp(new THREE.Vector3(targetScale, targetScale, targetScale), 0.08)
+      groupRef.current.rotation.y += reducedMotion ? 0.0003 : 0.0009
     }
 
-    if (starRef.current) {
-      starRef.current.rotation.x += reducedMotion ? 0.001 : 0.011
-      starRef.current.rotation.y += reducedMotion ? 0.0016 : 0.017
+    if (coreRef.current) {
+      coreRef.current.rotation.x += reducedMotion ? 0.0007 : 0.0045
+      coreRef.current.rotation.y += reducedMotion ? 0.0008 : 0.006
     }
 
     if (shellRef.current) {
-      shellRef.current.rotation.z += reducedMotion ? 0.0012 : 0.006
+      shellRef.current.rotation.y += reducedMotion ? 0.0004 : 0.0018
+      shellRef.current.rotation.z += reducedMotion ? 0.00035 : 0.0011
     }
 
-    updateParticleLayer(particles.primary, profile, elapsed)
-    updateParticleLayer(particles.secondary, profile, elapsed)
+    if (shellAccentRef.current) {
+      shellAccentRef.current.rotation.x += reducedMotion ? 0.0004 : 0.0018
+      shellAccentRef.current.rotation.y += reducedMotion ? 0.00045 : 0.0015
 
-    if (pointsPrimaryRef.current) {
-      const attribute = pointsPrimaryRef.current.geometry.attributes.position as THREE.BufferAttribute
+      if (style.kind === 'storm') {
+        const pulse = 1 + Math.sin(elapsed * 0.7) * 0.12 * intensity
+        accentScaleTargetRef.setScalar(pulse)
+        shellAccentRef.current.scale.lerp(accentScaleTargetRef, 0.08)
+      }
+
+      if (style.kind === 'pulse') {
+        const beat = 0.98 + Math.sin(elapsed * 0.65) * 0.1 * intensity
+        accentScaleTargetRef.setScalar(beat)
+        shellAccentRef.current.scale.lerp(accentScaleTargetRef, 0.08)
+      }
+    }
+
+    updateParticleField(particles, style, elapsed, intensity)
+
+    if (pointsRef.current) {
+      const attribute = pointsRef.current.geometry.attributes.position as THREE.BufferAttribute
       attribute.needsUpdate = true
     }
 
-    if (pointsSecondaryRef.current) {
-      const attribute = pointsSecondaryRef.current.geometry.attributes.position as THREE.BufferAttribute
-      attribute.needsUpdate = true
+    if (coreMaterialRef.current) {
+      coreMaterialRef.current.uniforms.uTime.value = elapsed
+      coreMaterialRef.current.uniforms.uColor.value.copy(accentColor)
+      coreMaterialRef.current.uniforms.uIntensity.value = 0.22 + intensity * 0.48
+      coreMaterialRef.current.uniforms.uEnergy.value = 0.2 + intensity * 0.7
+    }
+
+    if (shellMaterialRef.current) {
+      shellMaterialRef.current.uniforms.uTime.value = elapsed
+      shellMaterialRef.current.uniforms.uColor.value.copy(secondaryColor).lerp(accentColor, 0.18)
+      shellMaterialRef.current.uniforms.uIntensity.value = 0.26 + intensity * 0.62
+    }
+
+    if (particleMaterialRef.current) {
+      particleMaterialRef.current.uniforms.uTime.value = elapsed
+      particleMaterialRef.current.uniforms.uColor.value.copy(accentColor).lerp(secondaryColor, 0.12)
+      particleMaterialRef.current.uniforms.uIntensity.value = 0.22 + intensity * 0.74
+      particleMaterialRef.current.uniforms.uOpacity.value = 0.16 + intensity * 0.28
+      particleMaterialRef.current.uniforms.uPixelRatio.value = Math.min(gl.getPixelRatio(), 2)
     }
   })
 
   return (
     <group ref={groupRef} position={project.coordinates}>
-      {profile.starKind === 'core' && (
-        <>
-          <mesh ref={starRef}>
-            <dodecahedronGeometry args={[0.44, 0]} />
-            <meshPhysicalMaterial
-              color={profile.accent}
-              emissive={profile.accent}
-              emissiveIntensity={0.86}
-              roughness={0.16}
-              metalness={0.5}
-              clearcoat={1}
-              clearcoatRoughness={0.16}
-            />
-          </mesh>
-          <mesh ref={shellRef}>
-            <icosahedronGeometry args={[0.62, 1]} />
-            <meshBasicMaterial color={profile.secondaryAccent} transparent opacity={0.24} wireframe />
-          </mesh>
-        </>
-      )}
-
-      {profile.starKind === 'knot' && (
-        <>
-          <mesh ref={starRef}>
-            <torusKnotGeometry args={[0.27, 0.09, 170, 24]} />
-            <meshPhysicalMaterial
-              color={profile.accent}
-              emissive={profile.accent}
-              emissiveIntensity={0.82}
-              roughness={0.22}
-              metalness={0.45}
-              clearcoat={0.9}
-            />
-          </mesh>
-          <mesh ref={shellRef}>
-            <icosahedronGeometry args={[0.7, 1]} />
-            <meshBasicMaterial color={profile.secondaryAccent} transparent opacity={0.26} wireframe />
-          </mesh>
-        </>
-      )}
-
-      {profile.starKind === 'crystal' && (
-        <>
-          <mesh ref={starRef}>
-            <octahedronGeometry args={[0.46, 0]} />
-            <meshPhysicalMaterial
-              color={profile.accent}
-              emissive={profile.accent}
-              emissiveIntensity={0.84}
-              roughness={0.14}
-              metalness={0.52}
-              clearcoat={1}
-            />
-          </mesh>
-          <mesh ref={shellRef} rotation={[Math.PI / 4, Math.PI / 3, 0]}>
-            <dodecahedronGeometry args={[0.63, 0]} />
-            <meshBasicMaterial color={profile.secondaryAccent} transparent opacity={0.26} wireframe />
-          </mesh>
-        </>
-      )}
-
-      <points ref={pointsSecondaryRef}>
-        <bufferGeometry>
-          <bufferAttribute attach="attributes-position" args={[particles.secondary.positions, 3]} />
-        </bufferGeometry>
-        <pointsMaterial
-          map={particleTexture}
-          color={profile.secondaryAccent}
-          size={profile.secondarySize}
-          sizeAttenuation
+      <mesh ref={coreRef}>
+        {style.kind === 'harmonic' ? (
+          <torusKnotGeometry args={[0.24, 0.08, 180, 24]} />
+        ) : style.kind === 'pulse' ? (
+          <octahedronGeometry args={[0.46, 0]} />
+        ) : (
+          <dodecahedronGeometry args={[0.42, 0]} />
+        )}
+        <shaderMaterial
+          ref={coreMaterialRef}
+          uniforms={coreUniforms}
+          vertexShader={CORE_VERTEX_SHADER}
+          fragmentShader={CORE_FRAGMENT_SHADER}
           transparent
-          opacity={0.28}
           depthWrite={false}
-          alphaTest={0.01}
+          blending={THREE.AdditiveBlending}
+          toneMapped={false}
+        />
+      </mesh>
+
+      <mesh
+        ref={shellRef}
+        rotation={
+          style.kind === 'pulse'
+            ? [Math.PI / 4, Math.PI / 3, 0]
+            : style.kind === 'harmonic'
+              ? [Math.PI / 3, 0, 0]
+              : [0, 0, 0]
+        }
+      >
+        {style.kind === 'harmonic' ? (
+          <torusGeometry args={[0.66, 0.016, 16, 120]} />
+        ) : (
+          <icosahedronGeometry args={[style.shellScale, 1]} />
+        )}
+        <shaderMaterial
+          ref={shellMaterialRef}
+          uniforms={shellUniforms}
+          vertexShader={SHELL_VERTEX_SHADER}
+          fragmentShader={SHELL_FRAGMENT_SHADER}
+          transparent
+          depthWrite={false}
+          blending={THREE.AdditiveBlending}
+          wireframe
+          toneMapped={false}
+        />
+      </mesh>
+
+      {style.kind === 'storm' && (
+        <mesh ref={shellAccentRef} rotation={[Math.PI / 2, 0, 0]}>
+          <torusGeometry args={[1.1, 0.022, 16, 120]} />
+          <meshBasicMaterial color={style.accent} transparent opacity={0.2} depthWrite={false} blending={THREE.AdditiveBlending} />
+        </mesh>
+      )}
+
+      {style.kind === 'harmonic' && (
+        <group ref={shellAccentRef}>
+          <Line points={harmonicRingA} color={style.accent} lineWidth={1.1} transparent opacity={0.38} />
+          <Line points={harmonicRingB} color={style.secondary} lineWidth={0.95} transparent opacity={0.32} />
+        </group>
+      )}
+
+      {style.kind === 'pulse' && (
+        <group ref={shellAccentRef}>
+          <mesh rotation={[Math.PI / 2, 0, 0]}>
+            <torusGeometry args={[0.76, 0.018, 10, 90]} />
+            <meshBasicMaterial color={style.accent} transparent opacity={0.22} depthWrite={false} blending={THREE.AdditiveBlending} />
+          </mesh>
+          <mesh rotation={[Math.PI / 2, Math.PI / 5, 0]}>
+            <torusGeometry args={[1.02, 0.014, 10, 90]} />
+            <meshBasicMaterial color={style.secondary} transparent opacity={0.18} depthWrite={false} blending={THREE.AdditiveBlending} />
+          </mesh>
+        </group>
+      )}
+
+      <points ref={pointsRef}>
+        <bufferGeometry>
+          <bufferAttribute attach="attributes-position" args={[particles.positions, 3]} />
+          <bufferAttribute attach="attributes-aSize" args={[particles.sizes, 1]} />
+          <bufferAttribute attach="attributes-aFlicker" args={[particles.flickers, 1]} />
+        </bufferGeometry>
+        <shaderMaterial
+          ref={particleMaterialRef}
+          uniforms={particleUniforms}
+          vertexShader={PARTICLE_VERTEX_SHADER}
+          fragmentShader={PARTICLE_FRAGMENT_SHADER}
+          transparent
+          depthWrite={false}
           blending={THREE.AdditiveBlending}
           toneMapped={false}
         />
       </points>
-
-      <points ref={pointsPrimaryRef}>
-        <bufferGeometry>
-          <bufferAttribute attach="attributes-position" args={[particles.primary.positions, 3]} />
-        </bufferGeometry>
-        <pointsMaterial
-          map={particleTexture}
-          color={profile.accent}
-          size={profile.primarySize}
-          sizeAttenuation
-          transparent
-          opacity={0.9}
-          depthWrite={false}
-          alphaTest={0.01}
-          blending={THREE.AdditiveBlending}
-          toneMapped={false}
-        />
-      </points>
-
-      <Sparkles
-        count={reducedMotion ? 12 : 36}
-        scale={[2.8, 2.8, 2.8]}
-        speed={reducedMotion ? 0 : 0.32}
-        size={3.2}
-        noise={0.2}
-        color={profile.accent}
-      />
     </group>
   )
 }
 
-function CameraRig({ projects, activeProject, controlsRef, reducedMotion, onTransitionHalfway }: CameraRigProps) {
+function CinematicBloom({ project, reducedMotion }: CinematicBloomProps) {
+  const { gl, scene, camera, size } = useThree()
+  const composerRef = useRef<EffectComposer | null>(null)
+  const bloomRef = useRef<UnrealBloomPass | null>(null)
+
+  useEffect(() => {
+    const renderPass = new RenderPass(scene, camera)
+    const bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.9, 0.6, 0.36)
+    const composer = new EffectComposer(gl)
+
+    composer.addPass(renderPass)
+    composer.addPass(bloomPass)
+
+    composerRef.current = composer
+    bloomRef.current = bloomPass
+
+    return () => {
+      composer.dispose()
+      composerRef.current = null
+      bloomRef.current = null
+    }
+  }, [gl, scene, camera])
+
+  useEffect(() => {
+    composerRef.current?.setSize(size.width, size.height)
+  }, [size.width, size.height])
+
+  useEffect(() => {
+    const bloomPass = bloomRef.current
+
+    if (!bloomPass) {
+      return
+    }
+
+    if (!project) {
+      bloomPass.strength = reducedMotion ? 0.42 : 0.5
+      bloomPass.radius = 0.55
+      bloomPass.threshold = 0.44
+    } else if (project.id === 'gpgpu-particles') {
+      bloomPass.strength = reducedMotion ? 0.62 : 0.8
+      bloomPass.radius = 0.62
+      bloomPass.threshold = 0.34
+    } else if (project.id === 'voyce') {
+      bloomPass.strength = reducedMotion ? 0.52 : 0.68
+      bloomPass.radius = 0.58
+      bloomPass.threshold = 0.38
+    } else {
+      bloomPass.strength = reducedMotion ? 0.58 : 0.74
+      bloomPass.radius = 0.6
+      bloomPass.threshold = 0.35
+    }
+  }, [project, reducedMotion])
+
+  useFrame((_state, delta) => {
+    composerRef.current?.render(delta)
+  }, 1)
+
+  return null
+}
+
+function CameraRig({
+  projects,
+  activeProject,
+  controlsRef,
+  reducedMotion,
+  onTransitionHalfway,
+  onTransitionProgress,
+}: CameraRigProps) {
   const { camera, size } = useThree()
+
   const startTargetRef = useRef(new THREE.Vector3())
   const startCameraRef = useRef(new THREE.Vector3())
+  const endTargetRef = useRef(new THREE.Vector3())
+  const endCameraRef = useRef(new THREE.Vector3())
+
   const startOffsetDirectionRef = useRef(new THREE.Vector3(0, 0, 1))
   const endOffsetDirectionRef = useRef(new THREE.Vector3(0, 0, 1))
   const startOffsetRadiusRef = useRef(1)
   const endOffsetRadiusRef = useRef(1)
-  const targetRef = useRef(new THREE.Vector3())
-  const cameraPositionRef = useRef(new THREE.Vector3())
+
   const activeAnchorRef = useRef(new THREE.Vector3())
   const transitionTargetRef = useRef(new THREE.Vector3())
   const transitionDirectionRef = useRef(new THREE.Vector3())
   const fallbackAxisRef = useRef(new THREE.Vector3(1, 0, 0))
-  const xAxisRef = useRef(new THREE.Vector3(1, 0, 0))
+
   const orbitCameraOffsetRef = useRef(new THREE.Vector3())
   const orbitTargetOffsetRef = useRef(new THREE.Vector3())
-  const worldUpRef = useRef(new THREE.Vector3(0, 1, 0))
-  const isUserInteractingRef = useRef(false)
-  const transitionProgressRef = useRef(1)
+
+  const progressRef = useRef(1)
   const isTransitioningRef = useRef(true)
+  const isUserInteractingRef = useRef(false)
   const halfwayNotifiedRef = useRef(false)
 
   useEffect(() => {
@@ -603,12 +920,42 @@ function CameraRig({ projects, activeProject, controlsRef, reducedMotion, onTran
 
   useEffect(() => {
     const controls = controlsRef.current
+
+    if (projects.length === 0) {
+      return
+    }
+
     const perspectiveCamera = camera as THREE.PerspectiveCamera
-    const active = new THREE.Vector3(...activeProject.coordinates)
-    const focusRadius = getSignatureFocusRadius(activeProject)
+    const isNeutral = activeProject === null
+    const overallCentroid = new THREE.Vector3()
+    projects.forEach((project) => {
+      overallCentroid.add(new THREE.Vector3(...project.coordinates))
+    })
+    overallCentroid.multiplyScalar(1 / projects.length)
+
+    const active = isNeutral ? overallCentroid.clone() : new THREE.Vector3(...activeProject.coordinates)
+
+    const selectedProjectId = activeProject?.id ?? null
+    let focusRadius = 1
+
+    if (activeProject) {
+      focusRadius = getFocusRadius(activeProject)
+    }
+
+    if (isNeutral) {
+      let maxDistanceFromCentroid = 0
+      projects.forEach((project) => {
+        maxDistanceFromCentroid = Math.max(
+          maxDistanceFromCentroid,
+          new THREE.Vector3(...project.coordinates).distanceTo(active),
+        )
+      })
+      focusRadius = Math.max(2.2, maxDistanceFromCentroid + 0.8)
+    }
+
     const fovRad = THREE.MathUtils.degToRad(perspectiveCamera.fov)
 
-    const others = projects.filter((project) => project.id !== activeProject.id)
+    const others = isNeutral || !selectedProjectId ? projects : projects.filter((project) => project.id !== selectedProjectId)
     const centroid = new THREE.Vector3()
     let maxDistanceToOthers = 0
 
@@ -625,95 +972,92 @@ function CameraRig({ projects, activeProject, controlsRef, reducedMotion, onTran
 
     const towardOthers = centroid.clone().sub(active)
 
-    if (towardOthers.lengthSq() < 0.0001) {
-      towardOthers.set(1, 0.2, 0.6)
+    if (isNeutral) {
+      towardOthers.set(0.18, -0.08, -0.98).normalize()
+    } else {
+      if (towardOthers.lengthSq() < 0.0001) {
+        towardOthers.set(1, 0.2, 0.6)
+      }
+      towardOthers.normalize()
     }
-
-    towardOthers.normalize()
 
     let yawOffset = 0
     let distanceScale = 1
     let verticalBoost = 0
-    let fillBoost = 0
 
-    if (activeProject.id === 'voyce') {
-      yawOffset = 0.55
-      distanceScale = 0.88
-      verticalBoost = 0.12
-    } else if (activeProject.id === 'gpgpu-particles') {
-      yawOffset = 0.2
+    if (isNeutral) {
+      distanceScale = 1.22
+      verticalBoost = 0.14
+    } else if (selectedProjectId === 'voyce') {
+      yawOffset = 0.46
       distanceScale = 0.9
-    } else if (activeProject.id === 'tone-tap') {
-      yawOffset = 0.16
-      distanceScale = 0.82
-      verticalBoost = 0.04
-      fillBoost = 0.08
+      verticalBoost = 0.1
+    } else if (selectedProjectId === 'gpgpu-particles') {
+      yawOffset = 0.14
+      distanceScale = 0.88
+    } else {
+      yawOffset = 0.2
+      distanceScale = 0.86
+      verticalBoost = 0.05
     }
 
-    if (yawOffset !== 0) {
-      towardOthers.applyAxisAngle(new THREE.Vector3(0, 1, 0), yawOffset).normalize()
+    if (!isNeutral) {
+      towardOthers.applyAxisAngle(WORLD_UP, yawOffset).normalize()
     }
 
-    const side = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), towardOthers)
+    const side = new THREE.Vector3().crossVectors(WORLD_UP, towardOthers)
+
     if (side.lengthSq() < 0.0001) {
-      side.set(1, 0, 0)
+      side.copy(X_AXIS)
     }
+
     side.normalize()
 
-    const desiredFillBase = size.width < 900 ? 0.78 : 0.92
-    const desiredFill = Math.min(0.99, desiredFillBase + fillBoost)
+    const desiredFill = isNeutral ? (size.width < 900 ? 0.66 : 0.72) : size.width < 900 ? 0.78 : 0.92
     const fillDistance = (2 * focusRadius) / (desiredFill * Math.tan(fovRad / 2))
-    const spreadAllowance = Math.min(1.2, maxDistanceToOthers * 0.2)
+    const spreadAllowance = Math.min(1.2, maxDistanceToOthers * 0.18)
     const distance = THREE.MathUtils.clamp(
       (fillDistance + spreadAllowance) * distanceScale,
-      size.width < 900 ? 3.4 : 4.2,
-      size.width < 900 ? 5.4 : 6.2,
+      isNeutral ? (size.width < 900 ? 5.0 : 5.8) : size.width < 900 ? 3.8 : 4.5,
+      isNeutral ? (size.width < 900 ? 7.4 : 8.6) : size.width < 900 ? 5.8 : 6.8,
     )
 
-    const sideAmount = size.width < 900 ? 0.42 : 0.5 + maxDistanceToOthers * 0.12
-    const verticalLift = (size.width < 900 ? 0.42 : 0.58) + verticalBoost
-    const verticalOffset = new THREE.Vector3(0, verticalLift, 0)
+    const sideAmount = isNeutral ? (size.width < 900 ? 0.22 : 0.28) : size.width < 900 ? 0.4 : 0.52 + maxDistanceToOthers * 0.12
+    const verticalLift = (size.width < 900 ? 0.42 : 0.6) + verticalBoost
 
     startTargetRef.current.copy(controls?.target ?? active)
     startCameraRef.current.copy(camera.position)
 
     const target = active.clone()
     const baseCameraPosition = active.clone().sub(towardOthers.clone().multiplyScalar(distance))
-    const plusSidePosition = baseCameraPosition
-      .clone()
-      .add(side.clone().multiplyScalar(sideAmount))
-      .add(verticalOffset)
-    const minusSidePosition = baseCameraPosition
-      .clone()
-      .add(side.clone().multiplyScalar(-sideAmount))
-      .add(verticalOffset)
+    const plusSide = baseCameraPosition.clone().add(side.clone().multiplyScalar(sideAmount)).add(new THREE.Vector3(0, verticalLift, 0))
+    const minusSide = baseCameraPosition.clone().add(side.clone().multiplyScalar(-sideAmount)).add(new THREE.Vector3(0, verticalLift, 0))
 
     const currentOffsetFromActive = camera.position.clone().sub(active)
+
     if (currentOffsetFromActive.lengthSq() < 0.0001) {
       currentOffsetFromActive.set(0, 0, 1)
     }
 
-    const plusAngle = currentOffsetFromActive.angleTo(plusSidePosition.clone().sub(active))
-    const minusAngle = currentOffsetFromActive.angleTo(minusSidePosition.clone().sub(active))
-    const cameraPosition = plusAngle <= minusAngle ? plusSidePosition : minusSidePosition
+    const plusAngle = currentOffsetFromActive.angleTo(plusSide.clone().sub(active))
+    const minusAngle = currentOffsetFromActive.angleTo(minusSide.clone().sub(active))
+    const cameraPosition = isNeutral ? plusSide : plusAngle <= minusAngle ? plusSide : minusSide
 
     const viewDirection = target.clone().sub(cameraPosition).normalize()
-    const cameraRight = new THREE.Vector3().crossVectors(viewDirection, worldUpRef.current).normalize()
+    const cameraRight = new THREE.Vector3().crossVectors(viewDirection, WORLD_UP).normalize()
     const cameraUp = new THREE.Vector3().crossVectors(cameraRight, viewDirection).normalize()
 
-    let desiredNdcX = -0.02
-    const desiredNdcY = size.width < 900 ? -0.02 : 0.03
+    let desiredNdcX = isNeutral ? -0.01 : -0.03
+    const desiredNdcY = isNeutral ? (size.width < 900 ? 0 : 0.04) : size.width < 900 ? -0.02 : 0.02
 
     if (size.width >= 900) {
       const panelElement = document.querySelector('.hud-panel') as HTMLElement | null
 
       if (panelElement) {
         const panelRect = panelElement.getBoundingClientRect()
-        const safeRightEdge = Math.max(220, panelRect.left - 28)
-        const remainderCenterX = Math.min(safeRightEdge - 24, safeRightEdge * 0.5 + 86)
+        const safeRightEdge = Math.max(220, panelRect.left - 24)
+        const remainderCenterX = Math.min(safeRightEdge - 24, safeRightEdge * 0.5 + 96)
         desiredNdcX = (remainderCenterX / Math.max(size.width, 1)) * 2 - 1
-      } else {
-        desiredNdcX = -0.16
       }
     }
 
@@ -726,20 +1070,15 @@ function CameraRig({ projects, activeProject, controlsRef, reducedMotion, onTran
 
     target.add(lookOffset)
 
-    targetRef.current.copy(target)
+    endTargetRef.current.copy(target)
+    endCameraRef.current.copy(cameraPosition)
     activeAnchorRef.current.copy(active)
 
-    cameraPositionRef.current.copy(cameraPosition)
-
     const startOffset = startCameraRef.current.clone().sub(startTargetRef.current)
-    const endOffset = cameraPosition.clone().sub(target)
+    const endOffset = endCameraRef.current.clone().sub(endTargetRef.current)
 
     if (startOffset.lengthSq() < 0.0001) {
-      if (endOffset.lengthSq() < 0.0001) {
-        startOffset.set(0, 0, 1)
-      } else {
-        startOffset.copy(endOffset)
-      }
+      startOffset.copy(endOffset.lengthSq() < 0.0001 ? new THREE.Vector3(0, 0, 1) : endOffset)
     }
 
     if (endOffset.lengthSq() < 0.0001) {
@@ -751,10 +1090,11 @@ function CameraRig({ projects, activeProject, controlsRef, reducedMotion, onTran
     startOffsetDirectionRef.current.copy(startOffset.normalize())
     endOffsetDirectionRef.current.copy(endOffset.normalize())
 
-    transitionProgressRef.current = 0
+    progressRef.current = 0
     isTransitioningRef.current = true
     halfwayNotifiedRef.current = false
-  }, [activeProject, projects, size.width, size.height, camera, controlsRef])
+    onTransitionProgress?.(0)
+  }, [activeProject, projects, size.width, size.height, camera, controlsRef, onTransitionProgress])
 
   useFrame((_state, delta) => {
     const controls = controlsRef.current
@@ -764,15 +1104,15 @@ function CameraRig({ projects, activeProject, controlsRef, reducedMotion, onTran
     }
 
     if (!isTransitioningRef.current) {
-      if (!reducedMotion && !isUserInteractingRef.current) {
-        const orbitSpeed = size.width < 900 ? 0.2 : 0.16
+      if (!reducedMotion && !isUserInteractingRef.current && activeProject) {
+        const orbitSpeed = size.width < 900 ? 0.08 : 0.055
         const theta = delta * orbitSpeed
 
         orbitCameraOffsetRef.current.copy(camera.position).sub(activeAnchorRef.current)
         orbitTargetOffsetRef.current.copy(controls.target).sub(activeAnchorRef.current)
 
-        orbitCameraOffsetRef.current.applyAxisAngle(worldUpRef.current, theta)
-        orbitTargetOffsetRef.current.applyAxisAngle(worldUpRef.current, theta)
+        orbitCameraOffsetRef.current.applyAxisAngle(WORLD_UP, theta)
+        orbitTargetOffsetRef.current.applyAxisAngle(WORLD_UP, theta)
 
         camera.position.copy(activeAnchorRef.current).add(orbitCameraOffsetRef.current)
         controls.target.copy(activeAnchorRef.current).add(orbitTargetOffsetRef.current)
@@ -782,19 +1122,20 @@ function CameraRig({ projects, activeProject, controlsRef, reducedMotion, onTran
       return
     }
 
-    const duration = reducedMotion ? 0.01 : size.width < 900 ? 1.35 : 1.85
-    const nextProgress = Math.min(1, transitionProgressRef.current + delta / duration)
-    transitionProgressRef.current = nextProgress
+    const duration = reducedMotion ? 0.01 : size.width < 900 ? 1.65 : 2.2
+    const nextProgress = Math.min(1, progressRef.current + delta / duration)
+    progressRef.current = nextProgress
+    onTransitionProgress?.(nextProgress)
 
     if (!halfwayNotifiedRef.current && nextProgress >= 0.5) {
       halfwayNotifiedRef.current = true
       onTransitionHalfway?.()
     }
 
-    const easedProgress = easeInOutCubic(nextProgress)
-    const arcLift = reducedMotion ? 0 : Math.sin(Math.PI * easedProgress) * (size.width < 900 ? 0.08 : 0.22)
+    const eased = easeInOutCubic(nextProgress)
+    const arcLift = reducedMotion ? 0 : Math.sin(Math.PI * eased) * (size.width < 900 ? 0.08 : 0.24)
 
-    transitionTargetRef.current.lerpVectors(startTargetRef.current, targetRef.current, easedProgress)
+    transitionTargetRef.current.lerpVectors(startTargetRef.current, endTargetRef.current, eased)
     controls.target.copy(transitionTargetRef.current)
 
     const startDirection = startOffsetDirectionRef.current
@@ -802,35 +1143,31 @@ function CameraRig({ projects, activeProject, controlsRef, reducedMotion, onTran
     const dot = THREE.MathUtils.clamp(startDirection.dot(endDirection), -1, 1)
 
     if (dot > 0.9995) {
-      transitionDirectionRef.current.lerpVectors(startDirection, endDirection, easedProgress).normalize()
+      transitionDirectionRef.current.lerpVectors(startDirection, endDirection, eased).normalize()
     } else if (dot < -0.9995) {
-      fallbackAxisRef.current.crossVectors(worldUpRef.current, startDirection)
+      fallbackAxisRef.current.crossVectors(WORLD_UP, startDirection)
 
       if (fallbackAxisRef.current.lengthSq() < 0.0001) {
-        fallbackAxisRef.current.crossVectors(xAxisRef.current, startDirection)
+        fallbackAxisRef.current.crossVectors(X_AXIS, startDirection)
       }
 
       fallbackAxisRef.current.normalize()
-      transitionDirectionRef.current
-        .copy(startDirection)
-        .applyAxisAngle(fallbackAxisRef.current, Math.PI * easedProgress)
-        .normalize()
+      transitionDirectionRef.current.copy(startDirection).applyAxisAngle(fallbackAxisRef.current, Math.PI * eased).normalize()
     } else {
       const theta = Math.acos(dot)
       const sinTheta = Math.sin(theta)
-      const startWeight = Math.sin((1 - easedProgress) * theta) / sinTheta
-      const endWeight = Math.sin(easedProgress * theta) / sinTheta
+      const startWeight = Math.sin((1 - eased) * theta) / sinTheta
+      const endWeight = Math.sin(eased * theta) / sinTheta
 
-      transitionDirectionRef.current
-        .copy(startDirection)
-        .multiplyScalar(startWeight)
-        .addScaledVector(endDirection, endWeight)
-        .normalize()
+      transitionDirectionRef.current.copy(startDirection).multiplyScalar(startWeight).addScaledVector(endDirection, endWeight).normalize()
     }
 
-    const radius = THREE.MathUtils.lerp(startOffsetRadiusRef.current, endOffsetRadiusRef.current, easedProgress)
-    camera.position.copy(transitionTargetRef.current).addScaledVector(transitionDirectionRef.current, radius)
-    camera.position.addScaledVector(worldUpRef.current, arcLift)
+    const radius = THREE.MathUtils.lerp(startOffsetRadiusRef.current, endOffsetRadiusRef.current, eased)
+    const cinematicDolly = reducedMotion ? 0 : Math.sin(Math.PI * eased) * (size.width < 900 ? 0.44 : 0.94)
+
+    camera.position.copy(transitionTargetRef.current).addScaledVector(transitionDirectionRef.current, radius + cinematicDolly)
+    camera.position.addScaledVector(WORLD_UP, arcLift)
+
     controls.update()
 
     if (nextProgress >= 1) {
@@ -838,9 +1175,11 @@ function CameraRig({ projects, activeProject, controlsRef, reducedMotion, onTran
         halfwayNotifiedRef.current = true
         onTransitionHalfway?.()
       }
+
       isTransitioningRef.current = false
-      controls.target.copy(targetRef.current)
-      camera.position.copy(cameraPositionRef.current)
+      onTransitionProgress?.(1)
+      controls.target.copy(endTargetRef.current)
+      camera.position.copy(endCameraRef.current)
       controls.update()
     }
   })
@@ -848,81 +1187,203 @@ function CameraRig({ projects, activeProject, controlsRef, reducedMotion, onTran
   return null
 }
 
-function SceneContent({
-  projects,
-  activeProjectId,
-  onSelectProject,
-  reducedMotion,
-}: ConstellationSceneProps) {
+function CinematicLights({ project, reducedMotion }: { project: Project | null; reducedMotion: boolean }) {
+  const keyRef = useRef<THREE.PointLight>(null)
+  const rimRef = useRef<THREE.PointLight>(null)
+  const fillRef = useRef<THREE.PointLight>(null)
+  const hemiRef = useRef<THREE.HemisphereLight>(null)
+
+  const palette = useMemo(() => {
+    if (!project) {
+      return {
+        key: '#8fb9ef',
+        rim: '#6a8bc5',
+        fill: '#9db1d0',
+        hemiSky: '#a8c6ee',
+        hemiGround: '#091321',
+        keyIntensity: 1.1,
+        rimIntensity: 0.52,
+        fillIntensity: 0.42,
+      }
+    }
+
+    if (project.id === 'gpgpu-particles') {
+      return {
+        key: '#88c9ff',
+        rim: '#5a86ff',
+        fill: '#9ebce3',
+        hemiSky: '#b2d8ff',
+        hemiGround: '#091324',
+        keyIntensity: 1.36,
+        rimIntensity: 0.72,
+        fillIntensity: 0.58,
+      }
+    }
+
+    if (project.id === 'voyce') {
+      return {
+        key: '#8cf5d8',
+        rim: '#4fbf98',
+        fill: '#9dd9c9',
+        hemiSky: '#b0ffea',
+        hemiGround: '#081a1c',
+        keyIntensity: 1.28,
+        rimIntensity: 0.68,
+        fillIntensity: 0.54,
+      }
+    }
+
+    return {
+      key: '#ffc58f',
+      rim: '#dd8f50',
+      fill: '#e6bb94',
+      hemiSky: '#ffe0bf',
+      hemiGround: '#1a1009',
+      keyIntensity: 1.34,
+      rimIntensity: 0.7,
+      fillIntensity: 0.55,
+    }
+  }, [project])
+
+  useEffect(() => {
+    if (keyRef.current) {
+      keyRef.current.color.set(palette.key)
+    }
+
+    if (rimRef.current) {
+      rimRef.current.color.set(palette.rim)
+    }
+
+    if (fillRef.current) {
+      fillRef.current.color.set(palette.fill)
+    }
+
+    if (hemiRef.current) {
+      hemiRef.current.color.set(palette.hemiSky)
+      hemiRef.current.groundColor.set(palette.hemiGround)
+    }
+  }, [palette])
+
+  useFrame(({ clock }) => {
+    const pulse = reducedMotion ? 0 : (Math.sin(clock.getElapsedTime() * 1.2) + 1) * 0.5
+
+    if (keyRef.current) {
+      keyRef.current.intensity = THREE.MathUtils.lerp(keyRef.current.intensity, palette.keyIntensity * (0.92 + pulse * 0.12), 0.08)
+    }
+
+    if (rimRef.current) {
+      rimRef.current.intensity = THREE.MathUtils.lerp(rimRef.current.intensity, palette.rimIntensity * (0.9 + pulse * 0.12), 0.08)
+    }
+
+    if (fillRef.current) {
+      fillRef.current.intensity = THREE.MathUtils.lerp(fillRef.current.intensity, palette.fillIntensity * (0.9 + pulse * 0.1), 0.08)
+    }
+  })
+
+  return (
+    <>
+      <ambientLight intensity={0.34} />
+      <hemisphereLight ref={hemiRef} args={[palette.hemiSky, palette.hemiGround, 0.4]} />
+      <pointLight ref={keyRef} position={[6, 5, 4]} intensity={palette.keyIntensity} color={palette.key} />
+      <pointLight ref={fillRef} position={[-6, -2.5, -3]} intensity={palette.fillIntensity} color={palette.fill} />
+      <pointLight ref={rimRef} position={[0, 3, -7]} intensity={palette.rimIntensity} color={palette.rim} />
+    </>
+  )
+}
+
+function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotion }: ConstellationSceneProps) {
   const [hoveredProjectId, setHoveredProjectId] = useState<string | null>(null)
-  const [visualActiveProjectId, setVisualActiveProjectId] = useState(activeProjectId)
+  const [visualActiveProjectId, setVisualActiveProjectId] = useState<string | null>(activeProjectId)
+  const [transitionProgress, setTransitionProgress] = useState(1)
+
   const controlsRef = useRef<OrbitControlsImpl | null>(null)
-  const pendingVisualProjectIdRef = useRef<string | null>(null)
-  const resolvedVisualActiveProjectId = reducedMotion ? activeProjectId : visualActiveProjectId
+  const pendingVisualProjectIdRef = useRef<string | null | undefined>(undefined)
 
   const connections = useMemo(() => buildConnections(projects), [projects])
 
   const activeProject = useMemo(
-    () => projects.find((project) => project.id === activeProjectId) ?? projects[0],
+    () => (activeProjectId ? projects.find((project) => project.id === activeProjectId) ?? null : null),
     [projects, activeProjectId],
   )
+
   const visualActiveProject = useMemo(
-    () => projects.find((project) => project.id === resolvedVisualActiveProjectId) ?? activeProject,
-    [projects, resolvedVisualActiveProjectId, activeProject],
+    () => {
+      if (!visualActiveProjectId) {
+        return null
+      }
+
+      return projects.find((project) => project.id === visualActiveProjectId) ?? activeProject
+    },
+    [projects, visualActiveProjectId, activeProject],
   )
+
+  const mapVisibility = useMemo(() => {
+    if (!visualActiveProjectId) {
+      return 0.96
+    }
+
+    if (reducedMotion) {
+      return 0.28
+    }
+
+    return 0.18 + (1 - smoothstep(0.08, 0.62, transitionProgress)) * 0.62
+  }, [visualActiveProjectId, reducedMotion, transitionProgress])
+
+  const activeConnectionColor = useMemo(() => {
+    if (!visualActiveProject) {
+      return '#7489a8'
+    }
+
+    const color = new THREE.Color(visualActiveProject.color)
+    color.offsetHSL(0, -0.08, 0.14)
+    return `#${color.getHexString()}`
+  }, [visualActiveProject])
 
   useEffect(() => {
     if (reducedMotion) {
-      pendingVisualProjectIdRef.current = null
+      pendingVisualProjectIdRef.current = undefined
       return
     }
 
     pendingVisualProjectIdRef.current = activeProjectId
   }, [activeProjectId, reducedMotion])
 
-  const handleTransitionHalfway = () => {
-    if (!pendingVisualProjectIdRef.current) {
+  const handleTransitionHalfway = useCallback(() => {
+    if (pendingVisualProjectIdRef.current === undefined) {
       return
     }
 
     setVisualActiveProjectId(pendingVisualProjectIdRef.current)
-    pendingVisualProjectIdRef.current = null
-  }
+    pendingVisualProjectIdRef.current = undefined
+  }, [])
+
+  const handleTransitionProgress = useCallback((progress: number) => {
+    setTransitionProgress((previous) => (Math.abs(previous - progress) > 0.006 ? progress : previous))
+  }, [])
 
   return (
     <>
-      <color attach="background" args={['#030711']} />
-      <fog attach="fog" args={['#030711', 10, 38]} />
+      <color attach="background" args={['#020611']} />
+      <fog attach="fog" args={['#020611', 10, 44]} />
 
-      <ambientLight intensity={0.65} />
-      <hemisphereLight args={['#accfff', '#091321', 0.56]} />
-      <pointLight position={[6, 5, 4]} intensity={1.5} color="#9ec8ff" />
-      <pointLight position={[-6, -2.5, -3]} intensity={1} color="#ffc08d" />
-      <pointLight position={[0, 3, -7]} intensity={0.92} color="#d4c6ff" />
+      <CinematicLights project={visualActiveProject} reducedMotion={reducedMotion} />
 
       <Stars
-        radius={52}
-        depth={42}
-        count={reducedMotion ? 1200 : 2600}
-        factor={5.4}
+        radius={60}
+        depth={45}
+        count={reducedMotion ? 800 : 1700}
+        factor={4.3}
         saturation={0}
         fade
-        speed={reducedMotion ? 0 : 0.45}
-      />
-
-      <Sparkles
-        count={reducedMotion ? 28 : 80}
-        scale={[16, 12, 16]}
-        speed={reducedMotion ? 0 : 0.18}
-        size={3.7}
-        noise={0.22}
-        color="#8ec6ff"
+        speed={reducedMotion ? 0 : 0.24}
       />
 
       {connections.map((connection) => {
+        const showAllConnections = !visualActiveProjectId && !hoveredProjectId
         const linkedToSelection =
-          connection.projects[0] === resolvedVisualActiveProjectId ||
-          connection.projects[1] === resolvedVisualActiveProjectId ||
+          showAllConnections ||
+          connection.projects[0] === visualActiveProjectId ||
+          connection.projects[1] === visualActiveProjectId ||
           connection.projects[0] === hoveredProjectId ||
           connection.projects[1] === hoveredProjectId
 
@@ -934,10 +1395,10 @@ function SceneContent({
           <Line
             key={connection.id}
             points={connection.points}
-            color={linkedToSelection ? '#b5d9ff' : '#4f6078'}
+            color={activeConnectionColor}
             transparent
-            opacity={0.72}
-            lineWidth={1.35}
+            opacity={mapVisibility * 0.56}
+            lineWidth={1.0}
           />
         )
       })}
@@ -946,15 +1407,24 @@ function SceneContent({
         <ProjectNode
           key={project.id}
           project={project}
-          isActive={project.id === resolvedVisualActiveProjectId}
+          isActive={project.id === visualActiveProjectId}
           isHovered={project.id === hoveredProjectId}
+          mapVisibility={mapVisibility}
+          nodeDisplayMode={!visualActiveProjectId ? 'neutral' : 'background'}
           reducedMotion={reducedMotion}
           onHover={setHoveredProjectId}
           onSelect={onSelectProject}
         />
       ))}
 
-      <ProjectSignature project={visualActiveProject} reducedMotion={reducedMotion} />
+      {visualActiveProject && (
+        <HeroWorld
+          key={visualActiveProject.id}
+          project={visualActiveProject}
+          reducedMotion={reducedMotion}
+          transitionProgress={transitionProgress}
+        />
+      )}
 
       <OrbitControls
         ref={controlsRef}
@@ -963,9 +1433,9 @@ function SceneContent({
         enableRotate
         enableDamping
         dampingFactor={0.09}
-        rotateSpeed={0.6}
-        zoomSpeed={0.7}
-        minDistance={2.5}
+        rotateSpeed={0.52}
+        zoomSpeed={0.62}
+        minDistance={2.6}
         maxDistance={14}
         minPolarAngle={0.42}
         maxPolarAngle={2.5}
@@ -978,7 +1448,10 @@ function SceneContent({
         controlsRef={controlsRef}
         reducedMotion={reducedMotion}
         onTransitionHalfway={handleTransitionHalfway}
+        onTransitionProgress={handleTransitionProgress}
       />
+
+      <CinematicBloom project={visualActiveProject} reducedMotion={reducedMotion} />
     </>
   )
 }
@@ -988,12 +1461,12 @@ export function ConstellationScene(props: ConstellationSceneProps) {
     <Canvas
       className="constellation-canvas"
       style={{ position: 'absolute', inset: 0 }}
-      camera={{ position: [0, 1.8, 8.2], fov: 54, near: 0.1, far: 140 }}
+      camera={{ position: [0, 1.8, 8.4], fov: 54, near: 0.1, far: 150 }}
       dpr={[1, 2]}
       gl={{ antialias: true, alpha: false, powerPreference: 'high-performance' }}
       onCreated={({ gl }) => {
         gl.toneMapping = THREE.ACESFilmicToneMapping
-        gl.toneMappingExposure = 1.12
+        gl.toneMappingExposure = 1.0
       }}
       fallback={<div className="canvas-fallback">WebGL unavailable.</div>}
     >

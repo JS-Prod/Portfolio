@@ -7,11 +7,11 @@ import { ProjectPanel } from './components/ProjectPanel'
 import { projects } from './data/projects'
 
 function App() {
-  const [activeProjectId, setActiveProjectId] = useState<string>(projects[0].id)
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
   const reduceMotion = useReducedMotion() ?? false
 
   const activeProject = useMemo(
-    () => projects.find((project) => project.id === activeProjectId) ?? projects[0],
+    () => (activeProjectId ? projects.find((project) => project.id === activeProjectId) ?? null : null),
     [activeProjectId],
   )
 
@@ -20,7 +20,7 @@ function App() {
       <div className="scene-layer" aria-hidden="true">
         <ConstellationScene
           projects={projects}
-          activeProjectId={activeProject.id}
+          activeProjectId={activeProjectId}
           onSelectProject={setActiveProjectId}
           reducedMotion={reduceMotion}
         />
@@ -36,16 +36,28 @@ function App() {
         <ProjectPanel project={activeProject} />
       </main>
 
+      {activeProjectId && (
+        <button
+          type="button"
+          className="neutral-reset"
+          onClick={() => setActiveProjectId(null)}
+          aria-label="Return to neutral constellation view"
+          title="Return to neutral constellation view"
+        >
+          ↑
+        </button>
+      )}
+
       <nav className="project-rail" aria-label="Project constellation index">
         {projects.map((project) => {
-          const isActive = project.id === activeProject.id
+          const isActive = project.id === activeProjectId
 
           return (
             <button
               key={project.id}
               type="button"
               className={`project-pill ${isActive ? 'active' : ''}`}
-              onClick={() => setActiveProjectId(project.id)}
+              onClick={() => setActiveProjectId((previous) => (previous === project.id ? null : project.id))}
               aria-pressed={isActive}
             >
               <span className="pill-dot" style={{ backgroundColor: project.color }} aria-hidden="true" />
@@ -55,8 +67,10 @@ function App() {
         })}
       </nav>
 
-      <p className="interaction-hint">Drag to orbit. Click stars or project chips to inspect.</p>
-      <p className="active-readout">Active: {activeProject.title}</p>
+      <p className="interaction-hint">
+        Drag to orbit. Click stars or project chips to inspect. Click an active chip or top arrow to return to neutral.
+      </p>
+      <p className="active-readout">Active: {activeProject ? activeProject.title : 'None'}</p>
     </div>
   )
 }
