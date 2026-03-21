@@ -1,0 +1,70 @@
+@import url('https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+:root {
+  --bg-0: #02050f;
+  --bg-1: #061327;
+  --bg-2: #13284c;
+  --surface: rgba(11, 21, 40, 0.74);
+  --surface-strong: rgba(8, 17, 33, 0.92);
+  --border-soft: rgba(135, 172, 226, 0.18);
+  --border-strong: rgba(145, 188, 245, 0.4);
+  --text-high: #ecf4ff;
+  --text-body: #b9c8dd;
+  --text-muted: #8f9fb8;
+  --accent: #9fd2ff;
+  --accent-warm: #ffbe87;
+  --shadow-heavy: 0 26px 70px rgba(0, 0, 0, 0.38);
+
+  font-family: 'Space Grotesk', 'Avenir Next', 'Segoe UI', sans-serif;
+  line-height: 1.45;
+  font-weight: 400;
+  color: var(--text-body);
+  background-color: var(--bg-0);
+  text-rendering: optimizeLegibility;
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 12% 18%, rgba(87, 147, 236, 0.2), transparent 28%),
+    radial-gradient(circle at 88% 14%, rgba(255, 165, 120, 0.2), transparent 26%),
+    linear-gradient(160deg, var(--bg-0) 0%, var(--bg-1) 48%, var(--bg-0) 100%);
+  color: var(--text-body);
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 22% 85%, rgba(124, 177, 255, 0.12), transparent 40%),
+    radial-gradient(circle at 80% 70%, rgba(120, 238, 203, 0.1), transparent 36%);
+  z-index: -1;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
