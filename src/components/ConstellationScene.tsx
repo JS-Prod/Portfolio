@@ -1,4 +1,4 @@
-import { Html, Line, OrbitControls } from '@react-three/drei'
+import { Html, OrbitControls } from '@react-three/drei'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
@@ -35,6 +35,7 @@ type ProjectNodeProps = {
   isHovered: boolean
   mapVisibility: number
   nodeDisplayMode: 'neutral' | 'background'
+  neutralBlendOverride: number | null
   reducedMotion: boolean
   onHover: (projectId: string | null) => void
   onSelect: (projectId: string | null) => void
@@ -73,14 +74,21 @@ type HeroParticleField = {
 
 type NeutralStarInstances = {
   positions: Float32Array
+  xOffsets: Float32Array
+  yOffsets: Float32Array
+  depths: Float32Array
+  speeds: Float32Array
+  phases: Float32Array
   scales: Float32Array
+  driftRange: number
   count: number
 }
 
 type HeroWorldProps = {
   project: Project
   reducedMotion: boolean
-  transitionProgress: number
+  presenceTarget: number
+  collapseParticlesOnFadeOut: boolean
 }
 
 type CinematicBloomProps = {
@@ -236,26 +244,40 @@ function createRandom(seed: number) {
 function createNeutralStarInstances(
   seed: string,
   count: number,
-  radius: number,
-  depthSpread: number,
+  spreadX: number,
+  spreadY: number,
+  depthRange: [number, number],
+  driftSpeedRange: [number, number],
   sizeRange: [number, number],
 ): NeutralStarInstances {
   const random = createRandom(getHash(seed) + count * 13)
   const positions = new Float32Array(count * 3)
+  const xOffsets = new Float32Array(count)
+  const yOffsets = new Float32Array(count)
+  const depths = new Float32Array(count)
+  const speeds = new Float32Array(count)
+  const phases = new Float32Array(count)
   const scales = new Float32Array(count)
+  const [minDepth, maxDepth] = depthRange
+  const [minSpeed, maxSpeed] = driftSpeedRange
+  const driftRange = spreadX * 1.22
 
   for (let index = 0; index < count; index += 1) {
     const offset = index * 3
-    const u = random()
-    const v = random()
-    const theta = u * Math.PI * 2
-    const phi = Math.acos(2 * v - 1)
-    const shellRadius = radius + (random() - 0.5) * depthSpread
-    const sinPhi = Math.sin(phi)
+    const x = (random() * 2 - 1) * spreadX
+    const y = (random() * 2 - 1) * spreadY
+    const depth = minDepth + random() * (maxDepth - minDepth)
+    const speedVariance = random() > 0.96 ? 1.35 + random() * 0.18 : 1
 
-    positions[offset] = shellRadius * sinPhi * Math.cos(theta)
-    positions[offset + 1] = shellRadius * Math.cos(phi)
-    positions[offset + 2] = shellRadius * sinPhi * Math.sin(theta)
+    xOffsets[index] = x
+    yOffsets[index] = y
+    depths[index] = depth
+    speeds[index] = (minSpeed + random() * (maxSpeed - minSpeed)) * speedVariance
+    phases[index] = random() * Math.PI * 2
+
+    positions[offset] = x
+    positions[offset + 1] = y
+    positions[offset + 2] = -depth
 
     const [minScale, maxScale] = sizeRange
     const sparkle = random()
@@ -269,7 +291,17 @@ function createNeutralStarInstances(
     }
   }
 
-  return { positions, scales, count }
+  return {
+    positions,
+    xOffsets,
+    yOffsets,
+    depths,
+    speeds,
+    phases,
+    scales,
+    driftRange,
+    count,
+  }
 }
 
 function clamp01(value: number) {
@@ -409,8 +441,18 @@ function createParticleField(style: HeroStyle, seed: string): HeroParticleField 
   }
 }
 
-function updateParticleField(field: HeroParticleField, style: HeroStyle, elapsed: number, intensity: number) {
-  const smoothing = 0.12 + intensity * 0.08
+function updateParticleField(
+  field: HeroParticleField,
+  style: HeroStyle,
+  elapsed: number,
+  delta: number,
+  intensity: number,
+  collapseToCenter: boolean,
+) {
+  const clampedDelta = Math.min(delta, 1 / 24)
+  const spread = collapseToCenter ? smoothstep(0.08, 0.64, intensity) : 1
+  const collapse = 1 - spread
+  const smoothing = 1 - Math.exp(-(5.4 + intensity * 3.6 + collapse * 2.2) * clampedDelta)
 
   for (let index = 0; index < field.count; index += 1) {
     const offset = index * 3
@@ -433,9 +475,13 @@ function updateParticleField(field: HeroParticleField, style: HeroStyle, elapsed
       const targetY = by * radial + Math.sin(elapsed * 0.8 + phase) * 0.16
       const targetZ = Math.sin(spin) * radial + Math.cos(elapsed * 0.7 + phase) * 0.08
 
-      field.positions[offset] = THREE.MathUtils.lerp(field.positions[offset], targetX, smoothing)
-      field.positions[offset + 1] = THREE.MathUtils.lerp(field.positions[offset + 1], targetY, smoothing)
-      field.positions[offset + 2] = THREE.MathUtils.lerp(field.positions[offset + 2], targetZ, smoothing)
+      const finalX = targetX * spread
+      const finalY = targetY * spread
+      const finalZ = targetZ * spread
+
+      field.positions[offset] = THREE.MathUtils.lerp(field.positions[offset], finalX, smoothing)
+      field.positions[offset + 1] = THREE.MathUtils.lerp(field.positions[offset + 1], finalY, smoothing)
+      field.positions[offset + 2] = THREE.MathUtils.lerp(field.positions[offset + 2], finalZ, smoothing)
       continue
     }
 
@@ -449,9 +495,13 @@ function updateParticleField(field: HeroParticleField, style: HeroStyle, elapsed
       const targetY = by + wobble
       const targetZ = Math.sin(spin) * (baseRadius + drift)
 
-      field.positions[offset] = THREE.MathUtils.lerp(field.positions[offset], targetX, smoothing)
-      field.positions[offset + 1] = THREE.MathUtils.lerp(field.positions[offset + 1], targetY, smoothing)
-      field.positions[offset + 2] = THREE.MathUtils.lerp(field.positions[offset + 2], targetZ, smoothing)
+      const finalX = targetX * spread
+      const finalY = targetY * spread
+      const finalZ = targetZ * spread
+
+      field.positions[offset] = THREE.MathUtils.lerp(field.positions[offset], finalX, smoothing)
+      field.positions[offset + 1] = THREE.MathUtils.lerp(field.positions[offset + 1], finalY, smoothing)
+      field.positions[offset + 2] = THREE.MathUtils.lerp(field.positions[offset + 2], finalZ, smoothing)
       continue
     }
 
@@ -466,24 +516,14 @@ function updateParticleField(field: HeroParticleField, style: HeroStyle, elapsed
     const targetY = by * (0.82 + beat * 0.34) + Math.sin(elapsed * 0.85 + phase) * 0.07
     const targetZ = sz * beat
 
-    field.positions[offset] = THREE.MathUtils.lerp(field.positions[offset], targetX, smoothing)
-    field.positions[offset + 1] = THREE.MathUtils.lerp(field.positions[offset + 1], targetY, smoothing)
-    field.positions[offset + 2] = THREE.MathUtils.lerp(field.positions[offset + 2], targetZ, smoothing)
+    const finalX = targetX * spread
+    const finalY = targetY * spread
+    const finalZ = targetZ * spread
+
+    field.positions[offset] = THREE.MathUtils.lerp(field.positions[offset], finalX, smoothing)
+    field.positions[offset + 1] = THREE.MathUtils.lerp(field.positions[offset + 1], finalY, smoothing)
+    field.positions[offset + 2] = THREE.MathUtils.lerp(field.positions[offset + 2], finalZ, smoothing)
   }
-}
-
-function createCirclePoints(radius: number, segments: number, tilt = 0): Vector3[] {
-  const points: Vector3[] = []
-
-  for (let index = 0; index <= segments; index += 1) {
-    const t = (index / segments) * Math.PI * 2
-    const x = Math.cos(t) * radius
-    const z = Math.sin(t) * radius
-    const y = Math.sin(t * 2.0) * tilt
-    points.push([x, y, z])
-  }
-
-  return points
 }
 
 function getFocusRadius(project: Project) {
@@ -506,6 +546,7 @@ function ProjectNode({
   isHovered,
   mapVisibility,
   nodeDisplayMode,
+  neutralBlendOverride,
   reducedMotion,
   onHover,
   onSelect,
@@ -527,21 +568,23 @@ function ProjectNode({
     }
   }, [])
 
-  useFrame(({ clock }) => {
+  useFrame(({ clock }, delta) => {
     if (!groupRef.current) {
       return
     }
 
     const elapsed = clock.getElapsedTime()
+    const frameDelta = reducedMotion ? delta : Math.min(delta, 1 / 28)
+    const blendLerp = 1 - Math.exp(-(reducedMotion ? 12 : 8.5) * frameDelta)
+    const scaleLerp = 1 - Math.exp(-(reducedMotion ? 14 : 9.5) * frameDelta)
     const [x, y, z] = project.coordinates
     const drift = reducedMotion ? 0 : Math.sin(elapsed * 0.7 + phaseOffset) * 0.1
-    const neutralTarget = nodeDisplayMode === 'neutral' && !isActive ? 1 : 0
-    neutralBlendRef.current = THREE.MathUtils.lerp(
-      neutralBlendRef.current,
-      neutralTarget,
-      reducedMotion ? 0.2 : 0.08,
-    )
+    const neutralTarget = neutralBlendOverride ?? (nodeDisplayMode === 'neutral' ? 1 : 0)
+    const neutralBlendLerp =
+      neutralBlendOverride === null ? blendLerp : 1 - Math.exp(-(reducedMotion ? 14 : 6.2) * frameDelta)
+    neutralBlendRef.current = THREE.MathUtils.lerp(neutralBlendRef.current, isActive ? 0 : neutralTarget, neutralBlendLerp)
     const neutralBlend = neutralBlendRef.current
+    const neutralModeOpacity = neutralBlendOverride === null ? 1 : neutralBlend
     const pulseAmplitude = THREE.MathUtils.lerp(0.024, 0.048, neutralBlend)
     const pulse = reducedMotion ? 0 : Math.sin(elapsed * 2 + phaseOffset) * pulseAmplitude
 
@@ -551,16 +594,16 @@ function ProjectNode({
     const hoverScale = isHovered ? THREE.MathUtils.lerp(0.1, 0.16, neutralBlend) : 0
     const targetScale = baseScale + hoverScale
     scaleTargetRef.setScalar(targetScale + pulse)
-    groupRef.current.scale.lerp(scaleTargetRef, 0.1)
+    groupRef.current.scale.lerp(scaleTargetRef, scaleLerp)
 
     if (ringRef.current) {
-      ringRef.current.rotation.z += reducedMotion ? 0 : THREE.MathUtils.lerp(0.0032, 0.0048, neutralBlend)
+      ringRef.current.rotation.z += reducedMotion ? 0 : THREE.MathUtils.lerp(0.192, 0.288, neutralBlend) * frameDelta
       const innerRingScale = THREE.MathUtils.lerp(0.82, 1.42, neutralBlend) + (isHovered ? 0.08 : 0)
       ringRef.current.scale.setScalar(innerRingScale)
     }
 
     if (outerRingRef.current) {
-      outerRingRef.current.rotation.z -= reducedMotion ? 0 : THREE.MathUtils.lerp(0.0024, 0.0038, neutralBlend)
+      outerRingRef.current.rotation.z -= reducedMotion ? 0 : THREE.MathUtils.lerp(0.144, 0.228, neutralBlend) * frameDelta
       const outerRingScale = THREE.MathUtils.lerp(0.8, 1.5, neutralBlend) + (isHovered ? 0.08 : 0)
       outerRingRef.current.scale.setScalar(outerRingScale)
     }
@@ -571,21 +614,27 @@ function ProjectNode({
       const baseEmissive = isHovered ? 0.42 : 0.3
       const neutralEmissiveBoost = isHovered ? 0.32 : 0.24
 
-      nodeMaterialRef.current.opacity = isNeutralNode ? 1 : mapVisibility * (baseOpacity + neutralBlend * neutralOpacityBoost)
+      nodeMaterialRef.current.opacity = isNeutralNode
+        ? neutralModeOpacity
+        : mapVisibility * (baseOpacity + neutralBlend * neutralOpacityBoost)
       nodeMaterialRef.current.emissiveIntensity = mapVisibility * (baseEmissive + neutralBlend * neutralEmissiveBoost)
     }
 
     if (ringMaterialRef.current) {
       const baseRingOpacity = isHovered ? 0.22 : 0.13
       const neutralRingBoost = isHovered ? 0.34 : 0.3
-      ringMaterialRef.current.opacity = isNeutralNode ? 1 : mapVisibility * (baseRingOpacity + neutralBlend * neutralRingBoost)
+      ringMaterialRef.current.opacity = isNeutralNode
+        ? neutralModeOpacity
+        : mapVisibility * (baseRingOpacity + neutralBlend * neutralRingBoost)
     }
 
     if (outerRingMaterialRef.current) {
       const outerOpacity = isHovered ? 0.28 : 0.18
-      outerRingMaterialRef.current.opacity = isNeutralNode ? 1 : mapVisibility * outerOpacity * neutralBlend
+      outerRingMaterialRef.current.opacity = isNeutralNode ? neutralModeOpacity : mapVisibility * outerOpacity * neutralBlend
     }
   })
+
+  const neutralModeOpacity = neutralBlendOverride === null ? 1 : neutralBlendOverride
 
   return (
     <group ref={groupRef}>
@@ -596,8 +645,8 @@ function ProjectNode({
             <meshBasicMaterial
               ref={ringMaterialRef}
               color={project.color}
-              transparent={!isNeutralNode}
-              opacity={isNeutralNode ? 1 : 0.28}
+              transparent={!isNeutralNode || neutralBlendOverride !== null}
+              opacity={isNeutralNode ? neutralModeOpacity : 0.28}
               depthWrite
               depthTest
               blending={isNeutralNode ? THREE.NormalBlending : THREE.AdditiveBlending}
@@ -610,8 +659,8 @@ function ProjectNode({
             <meshBasicMaterial
               ref={outerRingMaterialRef}
               color={project.color}
-              transparent={!isNeutralNode}
-              opacity={isNeutralNode ? 1 : 0.22}
+              transparent={!isNeutralNode || neutralBlendOverride !== null}
+              opacity={isNeutralNode ? neutralModeOpacity : 0.22}
               depthWrite
               depthTest
               blending={isNeutralNode ? THREE.NormalBlending : THREE.AdditiveBlending}
@@ -643,8 +692,8 @@ function ProjectNode({
               emissive={project.color}
               roughness={0.3}
               metalness={0.2}
-              transparent={!isNeutralNode}
-              opacity={isNeutralNode ? 1 : 0.62}
+              transparent={!isNeutralNode || neutralBlendOverride !== null}
+              opacity={isNeutralNode ? neutralModeOpacity : 0.62}
               depthWrite
               depthTest
               blending={isNeutralNode ? THREE.NormalBlending : THREE.AdditiveBlending}
@@ -663,25 +712,52 @@ function ProjectNode({
   )
 }
 
-function HeroWorld({ project, reducedMotion, transitionProgress }: HeroWorldProps) {
+function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOnFadeOut }: HeroWorldProps) {
   const { gl } = useThree()
   const groupRef = useRef<THREE.Group>(null)
   const coreRef = useRef<THREE.Mesh>(null)
   const shellRef = useRef<THREE.Mesh>(null)
-  const shellAccentRef = useRef<THREE.Mesh>(null)
+  const shellAccentRef = useRef<THREE.Object3D>(null)
+  const coreMaskRef = useRef<THREE.Mesh>(null)
+  const shellMaskRef = useRef<THREE.Mesh>(null)
+  const shellAccentMaskRef = useRef<THREE.Object3D>(null)
   const pointsRef = useRef<THREE.Points>(null)
   const coreMaterialRef = useRef<THREE.ShaderMaterial>(null)
   const shellMaterialRef = useRef<THREE.ShaderMaterial>(null)
   const particleMaterialRef = useRef<THREE.ShaderMaterial>(null)
+  const accentPrimaryMaterialRef = useRef<THREE.MeshBasicMaterial>(null)
+  const accentSecondaryMaterialRef = useRef<THREE.MeshBasicMaterial>(null)
   const accentScaleTargetRef = useMemo(() => new THREE.Vector3(1, 1, 1), [])
+  const groupScaleTargetRef = useMemo(() => new THREE.Vector3(1, 1, 1), [])
+  const presenceRef = useRef(clamp01(presenceTarget))
 
   const style = useMemo(() => getHeroStyle(project), [project])
   const particles = useMemo(() => createParticleField(style, `${project.id}-hero-swarm`), [style, project.id])
   const accentColor = useMemo(() => new THREE.Color(style.accent), [style.accent])
   const secondaryColor = useMemo(() => new THREE.Color(style.secondary), [style.secondary])
+  const centerOccluderRadius = useMemo(() => {
+    if (style.kind === 'harmonic') {
+      return 0.41
+    }
 
-  const introProgress = transitionProgress < 0.5 ? 1 - smoothstep(0, 0.5, transitionProgress) : smoothstep(0.5, 1, transitionProgress)
-  const intensity = reducedMotion ? 1 : clamp01(introProgress)
+    if (style.kind === 'pulse') {
+      return 0.5
+    }
+
+    return 0.45
+  }, [style.kind])
+
+  const accentBaseOpacity = useMemo(() => {
+    if (style.kind === 'harmonic') {
+      return { primary: 0.24, secondary: 0.2 }
+    }
+
+    if (style.kind === 'pulse') {
+      return { primary: 0.22, secondary: 0.18 }
+    }
+
+    return { primary: 0.22, secondary: 0.18 }
+  }, [style.kind])
 
   const coreUniforms = useMemo(
     () => ({
@@ -714,46 +790,90 @@ function HeroWorld({ project, reducedMotion, transitionProgress }: HeroWorldProp
     [accentColor, secondaryColor, gl, style.swarmSize],
   )
 
-  const harmonicRingA = useMemo(() => createCirclePoints(1.12, 128, 0.06), [])
-  const harmonicRingB = useMemo(() => createCirclePoints(0.84, 128, 0.04), [])
-
-  useFrame(({ clock }) => {
+  useFrame(({ clock }, delta) => {
     const elapsed = clock.getElapsedTime()
+    const frameDelta = reducedMotion ? delta : Math.min(delta, 1 / 28)
+    const presenceLerp = 1 - Math.exp(-(reducedMotion ? 18 : 10.5) * frameDelta)
+    presenceRef.current = THREE.MathUtils.lerp(presenceRef.current, clamp01(presenceTarget), presenceLerp)
+    const intensity = clamp01(presenceRef.current)
+    const isVisible = intensity > 0.008
+    const maskVisible = intensity > 0.05
 
     if (groupRef.current) {
-      const targetScale = 0.72 + intensity * 0.36
-      groupRef.current.scale.lerp(new THREE.Vector3(targetScale, targetScale, targetScale), 0.08)
-      groupRef.current.rotation.y += reducedMotion ? 0.0003 : 0.0009
+      groupRef.current.visible = isVisible
+    }
+
+    if (coreMaskRef.current) {
+      coreMaskRef.current.visible = maskVisible
+    }
+
+    if (shellMaskRef.current) {
+      shellMaskRef.current.visible = maskVisible
+    }
+
+    if (shellAccentMaskRef.current) {
+      shellAccentMaskRef.current.visible = maskVisible
+    }
+
+    if (!isVisible) {
+      return
+    }
+
+    const scaleLerp = 1 - Math.exp(-(reducedMotion ? 10 : 7.5) * frameDelta)
+    const accentLerp = 1 - Math.exp(-(reducedMotion ? 12 : 8.5) * frameDelta)
+
+    if (groupRef.current) {
+      const targetScale = 0.44 + intensity * 0.66
+      groupScaleTargetRef.setScalar(targetScale)
+      groupRef.current.scale.lerp(groupScaleTargetRef, scaleLerp)
+      groupRef.current.rotation.y += frameDelta * (reducedMotion ? 0.018 : 0.054)
     }
 
     if (coreRef.current) {
-      coreRef.current.rotation.x += reducedMotion ? 0.0007 : 0.0045
-      coreRef.current.rotation.y += reducedMotion ? 0.0008 : 0.006
+      coreRef.current.rotation.x += frameDelta * (reducedMotion ? 0.042 : 0.27)
+      coreRef.current.rotation.y += frameDelta * (reducedMotion ? 0.048 : 0.36)
+
+      if (style.kind === 'pulse') {
+        coreRef.current.rotation.z += frameDelta * (reducedMotion ? 0.036 : 0.192)
+      }
     }
 
     if (shellRef.current) {
-      shellRef.current.rotation.y += reducedMotion ? 0.0004 : 0.0018
-      shellRef.current.rotation.z += reducedMotion ? 0.00035 : 0.0011
+      shellRef.current.rotation.y += frameDelta * (reducedMotion ? 0.024 : 0.108)
+      shellRef.current.rotation.z += frameDelta * (reducedMotion ? 0.021 : 0.066)
     }
 
     if (shellAccentRef.current) {
-      shellAccentRef.current.rotation.x += reducedMotion ? 0.0004 : 0.0018
-      shellAccentRef.current.rotation.y += reducedMotion ? 0.00045 : 0.0015
+      shellAccentRef.current.rotation.x += frameDelta * (reducedMotion ? 0.024 : 0.108)
+      shellAccentRef.current.rotation.y += frameDelta * (reducedMotion ? 0.027 : 0.09)
 
       if (style.kind === 'storm') {
         const pulse = 1 + Math.sin(elapsed * 0.7) * 0.12 * intensity
         accentScaleTargetRef.setScalar(pulse)
-        shellAccentRef.current.scale.lerp(accentScaleTargetRef, 0.08)
+        shellAccentRef.current.scale.lerp(accentScaleTargetRef, accentLerp)
       }
 
       if (style.kind === 'pulse') {
         const beat = 0.98 + Math.sin(elapsed * 0.65) * 0.1 * intensity
         accentScaleTargetRef.setScalar(beat)
-        shellAccentRef.current.scale.lerp(accentScaleTargetRef, 0.08)
+        shellAccentRef.current.scale.lerp(accentScaleTargetRef, accentLerp)
       }
     }
 
-    updateParticleField(particles, style, elapsed, intensity)
+    if (coreRef.current && coreMaskRef.current) {
+      coreMaskRef.current.rotation.copy(coreRef.current.rotation)
+    }
+
+    if (shellRef.current && shellMaskRef.current) {
+      shellMaskRef.current.rotation.copy(shellRef.current.rotation)
+    }
+
+    if (shellAccentRef.current && shellAccentMaskRef.current) {
+      shellAccentMaskRef.current.rotation.copy(shellAccentRef.current.rotation)
+      shellAccentMaskRef.current.scale.copy(shellAccentRef.current.scale)
+    }
+
+    updateParticleField(particles, style, elapsed, frameDelta, intensity, collapseParticlesOnFadeOut)
 
     if (pointsRef.current) {
       const attribute = pointsRef.current.geometry.attributes.position as THREE.BufferAttribute
@@ -763,27 +883,108 @@ function HeroWorld({ project, reducedMotion, transitionProgress }: HeroWorldProp
     if (coreMaterialRef.current) {
       coreMaterialRef.current.uniforms.uTime.value = elapsed
       coreMaterialRef.current.uniforms.uColor.value.copy(accentColor)
-      coreMaterialRef.current.uniforms.uIntensity.value = 0.22 + intensity * 0.48
-      coreMaterialRef.current.uniforms.uEnergy.value = 0.2 + intensity * 0.7
+      if (style.kind === 'pulse') {
+        coreMaterialRef.current.uniforms.uIntensity.value = (0.17 + intensity * 0.38) * intensity
+        coreMaterialRef.current.uniforms.uEnergy.value = (0.18 + intensity * 0.54) * intensity
+      } else {
+        coreMaterialRef.current.uniforms.uIntensity.value = (0.22 + intensity * 0.48) * intensity
+        coreMaterialRef.current.uniforms.uEnergy.value = (0.2 + intensity * 0.7) * intensity
+      }
     }
 
     if (shellMaterialRef.current) {
       shellMaterialRef.current.uniforms.uTime.value = elapsed
       shellMaterialRef.current.uniforms.uColor.value.copy(secondaryColor).lerp(accentColor, 0.18)
-      shellMaterialRef.current.uniforms.uIntensity.value = 0.26 + intensity * 0.62
+      shellMaterialRef.current.uniforms.uIntensity.value = (0.26 + intensity * 0.62) * intensity
     }
 
     if (particleMaterialRef.current) {
       particleMaterialRef.current.uniforms.uTime.value = elapsed
       particleMaterialRef.current.uniforms.uColor.value.copy(accentColor).lerp(secondaryColor, 0.12)
-      particleMaterialRef.current.uniforms.uIntensity.value = 0.22 + intensity * 0.74
-      particleMaterialRef.current.uniforms.uOpacity.value = 0.16 + intensity * 0.28
+      particleMaterialRef.current.uniforms.uIntensity.value = (0.22 + intensity * 0.74) * intensity
+      particleMaterialRef.current.uniforms.uOpacity.value = (0.16 + intensity * 0.28) * intensity
       particleMaterialRef.current.uniforms.uPixelRatio.value = Math.min(gl.getPixelRatio(), 2)
+    }
+
+    if (accentPrimaryMaterialRef.current) {
+      accentPrimaryMaterialRef.current.opacity = accentBaseOpacity.primary * intensity
+    }
+
+    if (accentSecondaryMaterialRef.current) {
+      accentSecondaryMaterialRef.current.opacity = accentBaseOpacity.secondary * intensity
     }
   })
 
   return (
     <group ref={groupRef} position={project.coordinates}>
+      <mesh renderOrder={-42}>
+        <sphereGeometry args={[centerOccluderRadius, 24, 24]} />
+        <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
+      </mesh>
+
+      <mesh ref={coreMaskRef} renderOrder={-40}>
+        {style.kind === 'harmonic' ? (
+          <torusKnotGeometry args={[0.24, 0.08, 180, 24]} />
+        ) : style.kind === 'pulse' ? (
+          <octahedronGeometry args={[0.46, 0]} />
+        ) : (
+          <dodecahedronGeometry args={[0.42, 0]} />
+        )}
+        <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
+      </mesh>
+
+      <mesh
+        ref={shellMaskRef}
+        renderOrder={-40}
+        rotation={
+          style.kind === 'pulse'
+            ? [Math.PI / 4, Math.PI / 3, 0]
+            : [0, 0, 0]
+        }
+      >
+        <icosahedronGeometry args={[style.shellScale, 1]} />
+        <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
+      </mesh>
+
+      {style.kind === 'storm' && (
+        <group ref={shellAccentMaskRef} renderOrder={-40}>
+          <mesh rotation={[Math.PI / 2, 0, 0]}>
+            <torusGeometry args={[1.1, 0.03, 16, 120]} />
+            <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
+          </mesh>
+          <mesh rotation={[Math.PI / 2, Math.PI / 5, 0]}>
+            <torusGeometry args={[0.9, 0.024, 16, 120]} />
+            <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
+          </mesh>
+        </group>
+      )}
+
+      {style.kind === 'harmonic' && (
+        <group ref={shellAccentMaskRef} renderOrder={-40}>
+          <mesh rotation={[Math.PI / 2, 0.06, 0]}>
+            <torusGeometry args={[1.1, 0.026, 12, 120]} />
+            <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
+          </mesh>
+          <mesh rotation={[Math.PI / 2, Math.PI / 5, 0]}>
+            <torusGeometry args={[0.9, 0.022, 12, 120]} />
+            <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
+          </mesh>
+        </group>
+      )}
+
+      {style.kind === 'pulse' && (
+        <group ref={shellAccentMaskRef} renderOrder={-40}>
+          <mesh rotation={[Math.PI / 2, 0, 0]}>
+            <torusGeometry args={[0.9, 0.024, 10, 90]} />
+            <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
+          </mesh>
+          <mesh rotation={[Math.PI / 2, Math.PI / 5, 0]}>
+            <torusGeometry args={[1.02, 0.02, 10, 90]} />
+            <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
+          </mesh>
+        </group>
+      )}
+
       <mesh ref={coreRef}>
         {style.kind === 'harmonic' ? (
           <torusKnotGeometry args={[0.24, 0.08, 180, 24]} />
@@ -798,6 +999,7 @@ function HeroWorld({ project, reducedMotion, transitionProgress }: HeroWorldProp
           vertexShader={CORE_VERTEX_SHADER}
           fragmentShader={CORE_FRAGMENT_SHADER}
           transparent
+          depthTest={false}
           depthWrite={false}
           blending={THREE.AdditiveBlending}
           toneMapped={false}
@@ -809,22 +1011,17 @@ function HeroWorld({ project, reducedMotion, transitionProgress }: HeroWorldProp
         rotation={
           style.kind === 'pulse'
             ? [Math.PI / 4, Math.PI / 3, 0]
-            : style.kind === 'harmonic'
-              ? [Math.PI / 3, 0, 0]
-              : [0, 0, 0]
+            : [0, 0, 0]
         }
       >
-        {style.kind === 'harmonic' ? (
-          <torusGeometry args={[0.66, 0.016, 16, 120]} />
-        ) : (
-          <icosahedronGeometry args={[style.shellScale, 1]} />
-        )}
+        <icosahedronGeometry args={[style.shellScale, 1]} />
         <shaderMaterial
           ref={shellMaterialRef}
           uniforms={shellUniforms}
           vertexShader={SHELL_VERTEX_SHADER}
           fragmentShader={SHELL_FRAGMENT_SHADER}
           transparent
+          depthTest={false}
           depthWrite={false}
           blending={THREE.AdditiveBlending}
           wireframe
@@ -833,28 +1030,88 @@ function HeroWorld({ project, reducedMotion, transitionProgress }: HeroWorldProp
       </mesh>
 
       {style.kind === 'storm' && (
-        <mesh ref={shellAccentRef} rotation={[Math.PI / 2, 0, 0]}>
-          <torusGeometry args={[1.1, 0.022, 16, 120]} />
-          <meshBasicMaterial color={style.accent} transparent opacity={0.2} depthWrite={false} blending={THREE.AdditiveBlending} />
-        </mesh>
+        <group ref={shellAccentRef}>
+          <mesh rotation={[Math.PI / 2, 0, 0]}>
+            <torusGeometry args={[1.1, 0.018, 16, 120]} />
+            <meshBasicMaterial
+              ref={accentPrimaryMaterialRef}
+              color={style.accent}
+              transparent
+              opacity={0.22}
+              depthTest={false}
+              depthWrite={false}
+              blending={THREE.AdditiveBlending}
+            />
+          </mesh>
+          <mesh rotation={[Math.PI / 2, Math.PI / 5, 0]}>
+            <torusGeometry args={[0.9, 0.015, 16, 120]} />
+            <meshBasicMaterial
+              ref={accentSecondaryMaterialRef}
+              color={style.secondary}
+              transparent
+              opacity={0.18}
+              depthTest={false}
+              depthWrite={false}
+              blending={THREE.AdditiveBlending}
+            />
+          </mesh>
+        </group>
       )}
 
       {style.kind === 'harmonic' && (
         <group ref={shellAccentRef}>
-          <Line points={harmonicRingA} color={style.accent} lineWidth={1.1} transparent opacity={0.38} />
-          <Line points={harmonicRingB} color={style.secondary} lineWidth={0.95} transparent opacity={0.32} />
+          <mesh rotation={[Math.PI / 2, 0.06, 0]}>
+            <torusGeometry args={[1.1, 0.018, 12, 120]} />
+            <meshBasicMaterial
+              ref={accentPrimaryMaterialRef}
+              color={style.accent}
+              transparent
+              opacity={0.24}
+              depthTest={false}
+              depthWrite={false}
+              blending={THREE.AdditiveBlending}
+            />
+          </mesh>
+          <mesh rotation={[Math.PI / 2, Math.PI / 5, 0]}>
+            <torusGeometry args={[0.9, 0.015, 12, 120]} />
+            <meshBasicMaterial
+              ref={accentSecondaryMaterialRef}
+              color={style.secondary}
+              transparent
+              opacity={0.2}
+              depthTest={false}
+              depthWrite={false}
+              blending={THREE.AdditiveBlending}
+            />
+          </mesh>
         </group>
       )}
 
       {style.kind === 'pulse' && (
         <group ref={shellAccentRef}>
           <mesh rotation={[Math.PI / 2, 0, 0]}>
-            <torusGeometry args={[0.76, 0.018, 10, 90]} />
-            <meshBasicMaterial color={style.accent} transparent opacity={0.22} depthWrite={false} blending={THREE.AdditiveBlending} />
+            <torusGeometry args={[0.9, 0.018, 10, 90]} />
+            <meshBasicMaterial
+              ref={accentPrimaryMaterialRef}
+              color={style.accent}
+              transparent
+              opacity={0.22}
+              depthTest={false}
+              depthWrite={false}
+              blending={THREE.AdditiveBlending}
+            />
           </mesh>
           <mesh rotation={[Math.PI / 2, Math.PI / 5, 0]}>
             <torusGeometry args={[1.02, 0.014, 10, 90]} />
-            <meshBasicMaterial color={style.secondary} transparent opacity={0.18} depthWrite={false} blending={THREE.AdditiveBlending} />
+            <meshBasicMaterial
+              ref={accentSecondaryMaterialRef}
+              color={style.secondary}
+              transparent
+              opacity={0.18}
+              depthTest={false}
+              depthWrite={false}
+              blending={THREE.AdditiveBlending}
+            />
           </mesh>
         </group>
       )}
@@ -871,6 +1128,7 @@ function HeroWorld({ project, reducedMotion, transitionProgress }: HeroWorldProp
           vertexShader={PARTICLE_VERTEX_SHADER}
           fragmentShader={PARTICLE_FRAGMENT_SHADER}
           transparent
+          depthTest
           depthWrite={false}
           blending={THREE.AdditiveBlending}
           toneMapped={false}
@@ -972,6 +1230,9 @@ function CameraRig({
   const isTransitioningRef = useRef(true)
   const isUserInteractingRef = useRef(false)
   const halfwayNotifiedRef = useRef(false)
+  const wasDampingEnabledRef = useRef(true)
+  const orbitResumeRef = useRef(1)
+  const arrivalHoldRef = useRef(0)
 
   useEffect(() => {
     const controls = controlsRef.current
@@ -979,6 +1240,8 @@ function CameraRig({
     if (!controls) {
       return
     }
+
+    wasDampingEnabledRef.current = controls.enableDamping
 
     const onStart = () => {
       isUserInteractingRef.current = true
@@ -1171,7 +1434,10 @@ function CameraRig({
 
     progressRef.current = 0
     isTransitioningRef.current = true
+    isUserInteractingRef.current = false
     halfwayNotifiedRef.current = false
+    orbitResumeRef.current = 0
+    arrivalHoldRef.current = 0
     onTransitionProgress?.(0)
   }, [activeProject, projects, size.width, size.height, camera, controlsRef, onTransitionProgress])
 
@@ -1183,9 +1449,21 @@ function CameraRig({
     }
 
     if (!isTransitioningRef.current) {
+      controls.enabled = true
+      controls.enableDamping = wasDampingEnabledRef.current
+      const frameDelta = reducedMotion ? delta : Math.min(delta, 1 / 30)
+
+      if (arrivalHoldRef.current > 0) {
+        arrivalHoldRef.current = Math.max(0, arrivalHoldRef.current - frameDelta)
+        controls.update()
+        return
+      }
+
       if (!reducedMotion && !isUserInteractingRef.current && activeProject) {
+        orbitResumeRef.current = THREE.MathUtils.clamp(orbitResumeRef.current + frameDelta * 1.6, 0, 1)
+        const orbitBlend = easeInOutCubic(orbitResumeRef.current)
         const orbitSpeed = size.width < 900 ? 0.08 : 0.055
-        const theta = delta * orbitSpeed
+        const theta = frameDelta * orbitSpeed * orbitBlend
 
         orbitCameraOffsetRef.current.copy(camera.position).sub(activeAnchorRef.current)
         orbitTargetOffsetRef.current.copy(controls.target).sub(activeAnchorRef.current)
@@ -1195,14 +1473,20 @@ function CameraRig({
 
         camera.position.copy(activeAnchorRef.current).add(orbitCameraOffsetRef.current)
         controls.target.copy(activeAnchorRef.current).add(orbitTargetOffsetRef.current)
+      } else {
+        orbitResumeRef.current = THREE.MathUtils.clamp(orbitResumeRef.current - frameDelta * 2.2, 0, 1)
       }
 
       controls.update()
       return
     }
 
-    const duration = reducedMotion ? 0.01 : size.width < 900 ? 1.65 : 2.2
-    const nextProgress = Math.min(1, progressRef.current + delta / duration)
+    controls.enabled = false
+    controls.enableDamping = false
+
+    const frameDelta = reducedMotion ? delta : Math.min(delta, 1 / 30)
+    const duration = reducedMotion ? 0.01 : size.width < 900 ? 1.75 : 2.35
+    const nextProgress = Math.min(1, progressRef.current + frameDelta / duration)
     progressRef.current = nextProgress
     onTransitionProgress?.(nextProgress)
 
@@ -1246,8 +1530,8 @@ function CameraRig({
 
     camera.position.copy(transitionTargetRef.current).addScaledVector(transitionDirectionRef.current, radius + cinematicDolly)
     camera.position.addScaledVector(WORLD_UP, arcLift)
-
-    controls.update()
+    camera.lookAt(transitionTargetRef.current)
+    camera.updateMatrixWorld()
 
     if (nextProgress >= 1) {
       if (!halfwayNotifiedRef.current) {
@@ -1257,11 +1541,16 @@ function CameraRig({
 
       isTransitioningRef.current = false
       onTransitionProgress?.(1)
-      controls.target.copy(endTargetRef.current)
-      camera.position.copy(endCameraRef.current)
+      orbitResumeRef.current = 0
+      arrivalHoldRef.current = reducedMotion ? 0 : 0.22
+      controls.enabled = true
+      controls.enableDamping = wasDampingEnabledRef.current
+      controls.target.copy(transitionTargetRef.current)
+      camera.lookAt(transitionTargetRef.current)
+      camera.updateMatrixWorld()
       controls.update()
     }
-  })
+  }, -1)
 
   return null
 }
@@ -1371,23 +1660,28 @@ function CinematicLights({ project, reducedMotion }: { project: Project | null; 
 }
 
 function NeutralStarField({ reducedMotion }: { reducedMotion: boolean }) {
-  const baseGroupRef = useRef<THREE.Group>(null)
-  const overlayGroupRef = useRef<THREE.Group>(null)
-  const baseMeshRef = useRef<THREE.InstancedMesh>(null)
-  const overlayMeshRef = useRef<THREE.InstancedMesh>(null)
+  const camera = useThree((state) => state.camera)
+  const baseAnchorRef = useRef<THREE.Group>(null)
+  const overlayAnchorRef = useRef<THREE.Group>(null)
+  const baseDriftRef = useRef<THREE.Group>(null)
+  const overlayDriftRef = useRef<THREE.Group>(null)
+  const baseMeshRefs = useRef<Array<THREE.InstancedMesh | null>>([])
+  const overlayMeshRefs = useRef<Array<THREE.InstancedMesh | null>>([])
   const scratchObject = useMemo(() => new THREE.Object3D(), [])
+  const tileOffsets = useMemo(() => [-1, 0, 1], [])
+  const tileSpan = 260
 
-  const baseStars = useMemo(
-    () => createNeutralStarInstances('neutral-stars-base', 1842, 122, 28, [0.036, 0.084]),
+  const neutralBaseStars = useMemo(
+    () => createNeutralStarInstances('neutral-stars-base', 1680, 130, 78, [84, 132], [0.62, 1.06], [0.036, 0.084]),
     [],
   )
-  const overlayStars = useMemo(
-    () => createNeutralStarInstances('neutral-stars-overlay', 744, 94, 18, [0.058, 0.125]),
+  const neutralOverlayStars = useMemo(
+    () => createNeutralStarInstances('neutral-stars-overlay', 640, 118, 66, [72, 112], [0.82, 1.28], [0.054, 0.118]),
     [],
   )
 
-  useLayoutEffect(() => {
-    const applyInstances = (mesh: THREE.InstancedMesh | null, stars: NeutralStarInstances) => {
+  const applyInstances = useCallback(
+    (mesh: THREE.InstancedMesh | null, stars: NeutralStarInstances) => {
       if (!mesh) {
         return
       }
@@ -1401,64 +1695,95 @@ function NeutralStarField({ reducedMotion }: { reducedMotion: boolean }) {
       }
 
       mesh.instanceMatrix.needsUpdate = true
-    }
+    },
+    [scratchObject],
+  )
 
-    applyInstances(baseMeshRef.current, baseStars)
-    applyInstances(overlayMeshRef.current, overlayStars)
-  }, [baseStars, overlayStars, scratchObject])
+  useLayoutEffect(() => {
+    baseMeshRefs.current.forEach((mesh) => applyInstances(mesh, neutralBaseStars))
+    overlayMeshRefs.current.forEach((mesh) => applyInstances(mesh, neutralOverlayStars))
+  }, [applyInstances, neutralBaseStars, neutralOverlayStars, tileOffsets])
 
   useFrame(({ clock }) => {
     const elapsed = clock.getElapsedTime()
+    const baseShift = reducedMotion ? 0 : (elapsed * 0.84) % tileSpan
+    const overlayShift = reducedMotion ? 0 : (elapsed * 1.02) % tileSpan
 
-    if (baseGroupRef.current) {
-      baseGroupRef.current.rotation.set(0, 0, 0)
-
-      if (!reducedMotion) {
-        baseGroupRef.current.rotation.y = elapsed * 0.008
-        baseGroupRef.current.rotation.x = Math.sin(elapsed * 0.045) * 0.014
-      }
+    if (baseAnchorRef.current) {
+      baseAnchorRef.current.position.copy(camera.position)
+      baseAnchorRef.current.quaternion.copy(camera.quaternion)
     }
 
-    if (overlayGroupRef.current) {
-      overlayGroupRef.current.rotation.set(0, 0, 0)
+    if (overlayAnchorRef.current) {
+      overlayAnchorRef.current.position.copy(camera.position)
+      overlayAnchorRef.current.quaternion.copy(camera.quaternion)
+    }
 
-      if (!reducedMotion) {
-        overlayGroupRef.current.rotation.y = -elapsed * 0.0065 + 1.1
-        overlayGroupRef.current.rotation.x = Math.cos(elapsed * 0.04) * 0.012
-      }
+    if (baseDriftRef.current) {
+      baseDriftRef.current.position.x = baseShift
+      baseDriftRef.current.position.y = reducedMotion ? 0 : Math.sin(elapsed * 0.09) * 0.35
+    }
+
+    if (overlayDriftRef.current) {
+      overlayDriftRef.current.position.x = overlayShift
+      overlayDriftRef.current.position.y = reducedMotion ? 0 : Math.cos(elapsed * 0.12) * 0.46
     }
   })
 
   return (
     <>
-      <group ref={baseGroupRef} renderOrder={-30} frustumCulled={false}>
-        <instancedMesh ref={baseMeshRef} args={[undefined, undefined, baseStars.count]} frustumCulled={false}>
-          <sphereGeometry args={[1, 6, 6]} />
-          <meshBasicMaterial
-            color="#e8f1ff"
-            transparent={false}
-            depthWrite={false}
-            depthTest
-            blending={THREE.NormalBlending}
-            fog={false}
-            toneMapped={false}
-          />
-        </instancedMesh>
+      <group ref={baseAnchorRef} renderOrder={-30} frustumCulled={false}>
+        <group ref={baseDriftRef}>
+          {tileOffsets.map((tileOffset, tileIndex) => (
+            <group key={`base-tile-${tileOffset}`} position={[tileOffset * tileSpan, 0, 0]}>
+              <instancedMesh
+                ref={(mesh) => {
+                  baseMeshRefs.current[tileIndex] = mesh
+                }}
+                args={[undefined, undefined, neutralBaseStars.count]}
+                frustumCulled={false}
+              >
+                <sphereGeometry args={[1, 6, 6]} />
+                <meshBasicMaterial
+                  color="#e8f1ff"
+                  transparent={false}
+                  depthWrite={false}
+                  depthTest
+                  blending={THREE.NormalBlending}
+                  fog={false}
+                  toneMapped={false}
+                />
+              </instancedMesh>
+            </group>
+          ))}
+        </group>
       </group>
 
-      <group ref={overlayGroupRef} renderOrder={-29} frustumCulled={false}>
-        <instancedMesh ref={overlayMeshRef} args={[undefined, undefined, overlayStars.count]} frustumCulled={false}>
-          <sphereGeometry args={[1, 6, 6]} />
-          <meshBasicMaterial
-            color="#f6fbff"
-            transparent={false}
-            depthWrite={false}
-            depthTest
-            blending={THREE.NormalBlending}
-            fog={false}
-            toneMapped={false}
-          />
-        </instancedMesh>
+      <group ref={overlayAnchorRef} renderOrder={-29} frustumCulled={false}>
+        <group ref={overlayDriftRef}>
+          {tileOffsets.map((tileOffset, tileIndex) => (
+            <group key={`overlay-tile-${tileOffset}`} position={[tileOffset * tileSpan, 0, 0]}>
+              <instancedMesh
+                ref={(mesh) => {
+                  overlayMeshRefs.current[tileIndex] = mesh
+                }}
+                args={[undefined, undefined, neutralOverlayStars.count]}
+                frustumCulled={false}
+              >
+                <sphereGeometry args={[1, 6, 6]} />
+                <meshBasicMaterial
+                  color="#f6fbff"
+                  transparent={false}
+                  depthWrite={false}
+                  depthTest
+                  blending={THREE.NormalBlending}
+                  fog={false}
+                  toneMapped={false}
+                />
+              </instancedMesh>
+            </group>
+          ))}
+        </group>
       </group>
     </>
   )
@@ -1467,10 +1792,11 @@ function NeutralStarField({ reducedMotion }: { reducedMotion: boolean }) {
 function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotion }: ConstellationSceneProps) {
   const [hoveredProjectId, setHoveredProjectId] = useState<string | null>(null)
   const [visualActiveProjectId, setVisualActiveProjectId] = useState<string | null>(activeProjectId)
+  const [outgoingHeroProjectId, setOutgoingHeroProjectId] = useState<string | null>(null)
   const [transitionProgress, setTransitionProgress] = useState(1)
 
   const controlsRef = useRef<OrbitControlsImpl | null>(null)
-  const pendingVisualProjectIdRef = useRef<string | null | undefined>(undefined)
+  const visualProjectIdRef = useRef<string | null>(activeProjectId)
 
   const connections = useMemo(() => buildConnections(projects), [projects])
   const connectionVisuals = useMemo<ConnectionVisual[]>(
@@ -1510,6 +1836,88 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
     [projects, visualActiveProjectId, activeProject],
   )
 
+  const outgoingHeroProject = useMemo(
+    () => (outgoingHeroProjectId ? projects.find((project) => project.id === outgoingHeroProjectId) ?? null : null),
+    [projects, outgoingHeroProjectId],
+  )
+
+  const heroBlend = useMemo(
+    () => (reducedMotion ? 1 : smoothstep(0.04, 0.96, transitionProgress)),
+    [reducedMotion, transitionProgress],
+  )
+
+  const incomingHeroPresence = useMemo(() => {
+    if (!visualActiveProjectId) {
+      return 0
+    }
+
+    if (reducedMotion) {
+      return 1
+    }
+
+    if (outgoingHeroProjectId && outgoingHeroProjectId !== visualActiveProjectId) {
+      return heroBlend
+    }
+
+    return transitionProgress < 0.999 ? heroBlend : 1
+  }, [heroBlend, outgoingHeroProjectId, reducedMotion, transitionProgress, visualActiveProjectId])
+
+  const outgoingHeroPresence = useMemo(() => {
+    if (!outgoingHeroProjectId) {
+      return 0
+    }
+
+    if (reducedMotion) {
+      return 0
+    }
+
+    return 1 - heroBlend
+  }, [heroBlend, outgoingHeroProjectId, reducedMotion])
+
+  const isNeutralToFocusedTransition = useMemo(
+    () => Boolean(transitionProgress < 0.999 && !outgoingHeroProjectId && visualActiveProjectId),
+    [outgoingHeroProjectId, transitionProgress, visualActiveProjectId],
+  )
+
+  const isFocusedToNeutralTransition = useMemo(
+    () => Boolean(transitionProgress < 0.999 && outgoingHeroProjectId && !visualActiveProjectId),
+    [outgoingHeroProjectId, transitionProgress, visualActiveProjectId],
+  )
+
+  const lowFiNeutralBlendOverride = useMemo(() => {
+    if (reducedMotion) {
+      return null
+    }
+
+    if (isNeutralToFocusedTransition) {
+      return 1 - smoothstep(0.0, 0.5, transitionProgress)
+    }
+
+    if (isFocusedToNeutralTransition) {
+      return smoothstep(0.0, 0.5, transitionProgress)
+    }
+
+    return null
+  }, [isFocusedToNeutralTransition, isNeutralToFocusedTransition, reducedMotion, transitionProgress])
+
+  const nodeActiveProjectId = useMemo(() => {
+    if (isNeutralToFocusedTransition && transitionProgress < 0.5) {
+      return null
+    }
+
+    if (isFocusedToNeutralTransition && transitionProgress < 0.5) {
+      return outgoingHeroProjectId
+    }
+
+    return visualActiveProjectId
+  }, [
+    isFocusedToNeutralTransition,
+    isNeutralToFocusedTransition,
+    outgoingHeroProjectId,
+    transitionProgress,
+    visualActiveProjectId,
+  ])
+
   const mapVisibility = useMemo(() => {
     if (!visualActiveProjectId) {
       return 0.96
@@ -1536,26 +1944,51 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
   const neutralConnectionColor = '#5f7ba1'
 
   useEffect(() => {
-    if (reducedMotion) {
-      pendingVisualProjectIdRef.current = undefined
+    const previousVisualId = visualProjectIdRef.current
+
+    if (previousVisualId === activeProjectId) {
       return
     }
 
-    pendingVisualProjectIdRef.current = activeProjectId
+    if (reducedMotion) {
+      setOutgoingHeroProjectId(null)
+      setVisualActiveProjectId(activeProjectId)
+      setTransitionProgress(1)
+      visualProjectIdRef.current = activeProjectId
+      return
+    }
+
+    setOutgoingHeroProjectId(previousVisualId)
+    setVisualActiveProjectId(activeProjectId)
+    setTransitionProgress(0)
+    visualProjectIdRef.current = activeProjectId
   }, [activeProjectId, reducedMotion])
 
-  const handleTransitionHalfway = useCallback(() => {
-    if (pendingVisualProjectIdRef.current === undefined) {
-      return
-    }
-
-    setVisualActiveProjectId(pendingVisualProjectIdRef.current)
-    pendingVisualProjectIdRef.current = undefined
-  }, [])
-
   const handleTransitionProgress = useCallback((progress: number) => {
-    setTransitionProgress((previous) => (Math.abs(previous - progress) > 0.006 ? progress : previous))
+    setTransitionProgress((previous) => {
+      if (progress === 0 || progress === 1) {
+        return progress
+      }
+
+      return Math.abs(previous - progress) > 0.02 ? progress : previous
+    })
+
+    if (progress >= 1) {
+      setOutgoingHeroProjectId(null)
+    }
   }, [])
+
+  const handleNodeSelect = useCallback(
+    (projectId: string | null) => {
+      setHoveredProjectId(null)
+      onSelectProject(projectId)
+    },
+    [onSelectProject],
+  )
+
+  useEffect(() => {
+    setHoveredProjectId(null)
+  }, [activeProjectId])
 
   return (
     <>
@@ -1599,22 +2032,34 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
         <ProjectNode
           key={project.id}
           project={project}
-          isActive={project.id === visualActiveProjectId}
+          isActive={project.id === nodeActiveProjectId}
           isHovered={project.id === hoveredProjectId}
           mapVisibility={mapVisibility}
           nodeDisplayMode={!visualActiveProjectId ? 'neutral' : 'background'}
+          neutralBlendOverride={lowFiNeutralBlendOverride}
           reducedMotion={reducedMotion}
           onHover={setHoveredProjectId}
-          onSelect={onSelectProject}
+          onSelect={handleNodeSelect}
         />
       ))}
 
-      {visualActiveProject && (
+      {outgoingHeroProject && outgoingHeroPresence > 0.004 && (
         <HeroWorld
-          key={visualActiveProject.id}
+          key={`hero-${outgoingHeroProject.id}`}
+          project={outgoingHeroProject}
+          reducedMotion={reducedMotion}
+          presenceTarget={outgoingHeroPresence}
+          collapseParticlesOnFadeOut
+        />
+      )}
+
+      {visualActiveProject && incomingHeroPresence > 0.004 && (
+        <HeroWorld
+          key={`hero-${visualActiveProject.id}`}
           project={visualActiveProject}
           reducedMotion={reducedMotion}
-          transitionProgress={transitionProgress}
+          presenceTarget={incomingHeroPresence}
+          collapseParticlesOnFadeOut={false}
         />
       )}
 
@@ -1641,7 +2086,6 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
         activeProject={activeProject}
         controlsRef={controlsRef}
         reducedMotion={reducedMotion}
-        onTransitionHalfway={handleTransitionHalfway}
         onTransitionProgress={handleTransitionProgress}
       />
 
