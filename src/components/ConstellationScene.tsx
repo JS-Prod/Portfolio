@@ -1,4 +1,4 @@
-import { Html, OrbitControls } from '@react-three/drei'
+import { Center, Html, OrbitControls, Text3D } from '@react-three/drei'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
@@ -99,6 +99,7 @@ type CinematicBloomProps = {
 const CONNECTION_DISTANCE = 6.2
 const WORLD_UP = new THREE.Vector3(0, 1, 0)
 const X_AXIS = new THREE.Vector3(1, 0, 0)
+const HERO_TEXT_FONT = '/fonts/helvetiker_bold.typeface.json'
 
 const CORE_VERTEX_SHADER = `
 varying vec3 vNormal;
@@ -160,14 +161,14 @@ varying vec3 vWorldPos;
 void main() {
   vec3 normal = normalize(vNormal);
   vec3 viewDir = normalize(cameraPosition - vWorldPos);
+  float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 1.55);
+  float edge = pow(fresnel, 1.8);
+  float flow = 0.5 + 0.5 * sin((vWorldPos.y * 6.2 + vWorldPos.x * 2.1) + uTime * 0.58);
+  float shell = 0.72 + flow * 0.28;
 
-  float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 1.9);
-  float edge = pow(fresnel, 2.4);
-  float scan = 0.5 + 0.5 * sin((vWorldPos.y + uTime * 1.65) * 10.5);
-  float shell = smoothstep(0.2, 1.0, fresnel) * (0.44 + scan * 0.56);
-
-  vec3 color = uColor * (0.42 + scan * 0.58 + edge * 0.3);
-  gl_FragColor = vec4(color, shell * (0.22 + edge * 0.12) * uIntensity);
+  vec3 color = uColor * (0.72 + flow * 0.22 + edge * 0.16);
+  float alpha = (0.28 + flow * 0.18 + edge * 0.08) * uIntensity;
+  gl_FragColor = vec4(color, alpha);
 }
 `
 
@@ -380,6 +381,18 @@ function getHeroStyle(project: Project): HeroStyle {
     swarmSize: 34,
     shellScale: 0.8,
   }
+}
+
+function getHeroCoreLabel(project: Project) {
+  if (project.id === 'gpgpu-particles') {
+    return 'GPGPU'
+  }
+
+  if (project.id === 'voyce') {
+    return 'VOYCE'
+  }
+
+  return 'TONE TAP'
 }
 
 function createParticleField(style: HeroStyle, seed: string): HeroParticleField {
@@ -713,12 +726,12 @@ function ProjectNode({
 }
 
 function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOnFadeOut }: HeroWorldProps) {
-  const { gl } = useThree()
+  const { gl, camera } = useThree()
   const groupRef = useRef<THREE.Group>(null)
-  const coreRef = useRef<THREE.Mesh>(null)
+  const coreRef = useRef<THREE.Object3D>(null)
   const shellRef = useRef<THREE.Mesh>(null)
   const shellAccentRef = useRef<THREE.Object3D>(null)
-  const coreMaskRef = useRef<THREE.Mesh>(null)
+  const coreMaskRef = useRef<THREE.Object3D>(null)
   const shellMaskRef = useRef<THREE.Mesh>(null)
   const shellAccentMaskRef = useRef<THREE.Object3D>(null)
   const pointsRef = useRef<THREE.Points>(null)
@@ -730,22 +743,27 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
   const accentScaleTargetRef = useMemo(() => new THREE.Vector3(1, 1, 1), [])
   const groupScaleTargetRef = useMemo(() => new THREE.Vector3(1, 1, 1), [])
   const presenceRef = useRef(clamp01(presenceTarget))
+  const coreLookTargetRef = useMemo(() => new THREE.Vector3(), [])
+  const coreWorldPositionRef = useMemo(() => new THREE.Vector3(), [])
+  const coreCurrentQuaternionRef = useMemo(() => new THREE.Quaternion(), [])
+  const coreTargetQuaternionRef = useMemo(() => new THREE.Quaternion(), [])
 
   const style = useMemo(() => getHeroStyle(project), [project])
+  const coreLabel = useMemo(() => getHeroCoreLabel(project), [project])
+  const coreTextSize = useMemo(() => (coreLabel.length > 7 ? 0.16 : 0.21), [coreLabel])
+  const coreTextHeight = useMemo(() => (coreLabel.length > 7 ? 0.056 : 0.074), [coreLabel])
+  const coreTextBevelSize = useMemo(() => (coreLabel.length > 7 ? 0.006 : 0.008), [coreLabel])
+  const coreTextOffsetY = useMemo(() => (coreLabel.length > 7 ? -0.05 : -0.032), [coreLabel])
   const particles = useMemo(() => createParticleField(style, `${project.id}-hero-swarm`), [style, project.id])
   const accentColor = useMemo(() => new THREE.Color(style.accent), [style.accent])
   const secondaryColor = useMemo(() => new THREE.Color(style.secondary), [style.secondary])
   const centerOccluderRadius = useMemo(() => {
-    if (style.kind === 'harmonic') {
-      return 0.41
+    if (coreLabel.length > 7) {
+      return 0.62
     }
 
-    if (style.kind === 'pulse') {
-      return 0.5
-    }
-
-    return 0.45
-  }, [style.kind])
+    return 0.52
+  }, [coreLabel])
 
   const accentBaseOpacity = useMemo(() => {
     if (style.kind === 'harmonic') {
@@ -830,12 +848,18 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
     }
 
     if (coreRef.current) {
-      coreRef.current.rotation.x += frameDelta * (reducedMotion ? 0.042 : 0.27)
-      coreRef.current.rotation.y += frameDelta * (reducedMotion ? 0.048 : 0.36)
+      const lookLerp = 1 - Math.exp(-(reducedMotion ? 16 : 9.8) * frameDelta)
 
-      if (style.kind === 'pulse') {
-        coreRef.current.rotation.z += frameDelta * (reducedMotion ? 0.036 : 0.192)
-      }
+      coreRef.current.getWorldPosition(coreWorldPositionRef)
+      coreLookTargetRef.copy(camera.position)
+      // Keep text upright by only yawing toward camera.
+      coreLookTargetRef.y = coreWorldPositionRef.y
+
+      coreCurrentQuaternionRef.copy(coreRef.current.quaternion)
+      coreRef.current.lookAt(coreLookTargetRef)
+      coreTargetQuaternionRef.copy(coreRef.current.quaternion)
+      coreRef.current.quaternion.copy(coreCurrentQuaternionRef)
+      coreRef.current.quaternion.slerp(coreTargetQuaternionRef, lookLerp)
     }
 
     if (shellRef.current) {
@@ -861,7 +885,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
     }
 
     if (coreRef.current && coreMaskRef.current) {
-      coreMaskRef.current.rotation.copy(coreRef.current.rotation)
+      coreMaskRef.current.quaternion.copy(coreRef.current.quaternion)
     }
 
     if (shellRef.current && shellMaskRef.current) {
@@ -922,16 +946,23 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
         <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
       </mesh>
 
-      <mesh ref={coreMaskRef} renderOrder={-40}>
-        {style.kind === 'harmonic' ? (
-          <torusKnotGeometry args={[0.24, 0.08, 180, 24]} />
-        ) : style.kind === 'pulse' ? (
-          <octahedronGeometry args={[0.46, 0]} />
-        ) : (
-          <dodecahedronGeometry args={[0.42, 0]} />
-        )}
-        <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
-      </mesh>
+      <group ref={coreMaskRef} renderOrder={-40}>
+        <Center position={[0, coreTextOffsetY, 0]}>
+          <Text3D
+            font={HERO_TEXT_FONT}
+            size={coreTextSize}
+            height={coreTextHeight}
+            curveSegments={18}
+            bevelEnabled
+            bevelSize={coreTextBevelSize}
+            bevelThickness={coreTextBevelSize * 1.6}
+            bevelSegments={6}
+          >
+            {coreLabel}
+            <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
+          </Text3D>
+        </Center>
+      </group>
 
       <mesh
         ref={shellMaskRef}
@@ -985,26 +1016,33 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
         </group>
       )}
 
-      <mesh ref={coreRef}>
-        {style.kind === 'harmonic' ? (
-          <torusKnotGeometry args={[0.24, 0.08, 180, 24]} />
-        ) : style.kind === 'pulse' ? (
-          <octahedronGeometry args={[0.46, 0]} />
-        ) : (
-          <dodecahedronGeometry args={[0.42, 0]} />
-        )}
-        <shaderMaterial
-          ref={coreMaterialRef}
-          uniforms={coreUniforms}
-          vertexShader={CORE_VERTEX_SHADER}
-          fragmentShader={CORE_FRAGMENT_SHADER}
-          transparent
-          depthTest={false}
-          depthWrite={false}
-          blending={THREE.AdditiveBlending}
-          toneMapped={false}
-        />
-      </mesh>
+      <group ref={coreRef}>
+        <Center position={[0, coreTextOffsetY, 0]}>
+          <Text3D
+            font={HERO_TEXT_FONT}
+            size={coreTextSize}
+            height={coreTextHeight}
+            curveSegments={18}
+            bevelEnabled
+            bevelSize={coreTextBevelSize}
+            bevelThickness={coreTextBevelSize * 1.6}
+            bevelSegments={6}
+          >
+            {coreLabel}
+            <shaderMaterial
+              ref={coreMaterialRef}
+              uniforms={coreUniforms}
+              vertexShader={CORE_VERTEX_SHADER}
+              fragmentShader={CORE_FRAGMENT_SHADER}
+              transparent
+              depthTest={false}
+              depthWrite={false}
+              blending={THREE.AdditiveBlending}
+              toneMapped={false}
+            />
+          </Text3D>
+        </Center>
+      </group>
 
       <mesh
         ref={shellRef}
