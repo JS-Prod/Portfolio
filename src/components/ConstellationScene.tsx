@@ -1,6 +1,6 @@
-import { Html, Line, OrbitControls, Stars } from '@react-three/drei'
+import { Html, Line, OrbitControls } from '@react-three/drei'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import * as THREE from 'three'
 import { EffectComposer, RenderPass, UnrealBloomPass } from 'three-stdlib'
@@ -21,6 +21,12 @@ type Connection = {
   id: string
   points: [Vector3, Vector3]
   projects: [string, string]
+}
+
+type ConnectionVisual = Connection & {
+  midpoint: Vector3
+  quaternion: [number, number, number, number]
+  length: number
 }
 
 type ProjectNodeProps = {
@@ -62,6 +68,12 @@ type HeroParticleField = {
   radii: Float32Array
   sizes: Float32Array
   flickers: Float32Array
+  count: number
+}
+
+type NeutralStarInstances = {
+  positions: Float32Array
+  scales: Float32Array
   count: number
 }
 
@@ -219,6 +231,45 @@ function createRandom(seed: number) {
     t ^= t + Math.imul(t ^ (t >>> 7), 61 | t)
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296
   }
+}
+
+function createNeutralStarInstances(
+  seed: string,
+  count: number,
+  radius: number,
+  depthSpread: number,
+  sizeRange: [number, number],
+): NeutralStarInstances {
+  const random = createRandom(getHash(seed) + count * 13)
+  const positions = new Float32Array(count * 3)
+  const scales = new Float32Array(count)
+
+  for (let index = 0; index < count; index += 1) {
+    const offset = index * 3
+    const u = random()
+    const v = random()
+    const theta = u * Math.PI * 2
+    const phi = Math.acos(2 * v - 1)
+    const shellRadius = radius + (random() - 0.5) * depthSpread
+    const sinPhi = Math.sin(phi)
+
+    positions[offset] = shellRadius * sinPhi * Math.cos(theta)
+    positions[offset + 1] = shellRadius * Math.cos(phi)
+    positions[offset + 2] = shellRadius * sinPhi * Math.sin(theta)
+
+    const [minScale, maxScale] = sizeRange
+    const sparkle = random()
+
+    const scaleBase = minScale + random() * (maxScale - minScale)
+
+    if (sparkle > 0.985) {
+      scales[index] = scaleBase * (1.38 + random() * 0.58)
+    } else {
+      scales[index] = scaleBase
+    }
+  }
+
+  return { positions, scales, count }
 }
 
 function clamp01(value: number) {
@@ -459,6 +510,7 @@ function ProjectNode({
   onHover,
   onSelect,
 }: ProjectNodeProps) {
+  const isNeutralNode = nodeDisplayMode === 'neutral'
   const groupRef = useRef<THREE.Group>(null)
   const ringRef = useRef<THREE.Mesh>(null)
   const outerRingRef = useRef<THREE.Mesh>(null)
@@ -503,31 +555,35 @@ function ProjectNode({
 
     if (ringRef.current) {
       ringRef.current.rotation.z += reducedMotion ? 0 : THREE.MathUtils.lerp(0.0032, 0.0048, neutralBlend)
+      const innerRingScale = THREE.MathUtils.lerp(0.82, 1.42, neutralBlend) + (isHovered ? 0.08 : 0)
+      ringRef.current.scale.setScalar(innerRingScale)
     }
 
     if (outerRingRef.current) {
       outerRingRef.current.rotation.z -= reducedMotion ? 0 : THREE.MathUtils.lerp(0.0024, 0.0038, neutralBlend)
+      const outerRingScale = THREE.MathUtils.lerp(0.8, 1.5, neutralBlend) + (isHovered ? 0.08 : 0)
+      outerRingRef.current.scale.setScalar(outerRingScale)
     }
 
     if (nodeMaterialRef.current) {
-      const baseOpacity = isHovered ? 0.74 : 0.62
-      const neutralOpacityBoost = isHovered ? 0.2 : 0.16
+      const baseOpacity = isHovered ? 0.54 : 0.4
+      const neutralOpacityBoost = isHovered ? 0.16 : 0.14
       const baseEmissive = isHovered ? 0.42 : 0.3
       const neutralEmissiveBoost = isHovered ? 0.32 : 0.24
 
-      nodeMaterialRef.current.opacity = mapVisibility * (baseOpacity + neutralBlend * neutralOpacityBoost)
+      nodeMaterialRef.current.opacity = isNeutralNode ? 1 : mapVisibility * (baseOpacity + neutralBlend * neutralOpacityBoost)
       nodeMaterialRef.current.emissiveIntensity = mapVisibility * (baseEmissive + neutralBlend * neutralEmissiveBoost)
     }
 
     if (ringMaterialRef.current) {
-      const baseRingOpacity = isHovered ? 0.2 : 0.12
-      const neutralRingBoost = isHovered ? 0.28 : 0.24
-      ringMaterialRef.current.opacity = mapVisibility * (baseRingOpacity + neutralBlend * neutralRingBoost)
+      const baseRingOpacity = isHovered ? 0.22 : 0.13
+      const neutralRingBoost = isHovered ? 0.34 : 0.3
+      ringMaterialRef.current.opacity = isNeutralNode ? 1 : mapVisibility * (baseRingOpacity + neutralBlend * neutralRingBoost)
     }
 
     if (outerRingMaterialRef.current) {
-      const outerOpacity = isHovered ? 0.24 : 0.16
-      outerRingMaterialRef.current.opacity = mapVisibility * outerOpacity * neutralBlend
+      const outerOpacity = isHovered ? 0.28 : 0.18
+      outerRingMaterialRef.current.opacity = isNeutralNode ? 1 : mapVisibility * outerOpacity * neutralBlend
     }
   })
 
@@ -535,17 +591,36 @@ function ProjectNode({
     <group ref={groupRef}>
       {!isActive && (
         <>
-          <mesh ref={ringRef}>
+          <mesh ref={ringRef} renderOrder={-20}>
             <torusGeometry args={[0.31, 0.014, 12, 80]} />
-            <meshBasicMaterial ref={ringMaterialRef} color={project.color} transparent depthWrite={false} />
+            <meshBasicMaterial
+              ref={ringMaterialRef}
+              color={project.color}
+              transparent={!isNeutralNode}
+              opacity={isNeutralNode ? 1 : 0.28}
+              depthWrite
+              depthTest
+              blending={isNeutralNode ? THREE.NormalBlending : THREE.AdditiveBlending}
+              toneMapped={false}
+            />
           </mesh>
 
-          <mesh ref={outerRingRef} rotation={[Math.PI * 0.32, 0, 0]}>
+          <mesh ref={outerRingRef} rotation={[Math.PI * 0.32, 0, 0]} renderOrder={-20}>
             <torusGeometry args={[0.43, 0.01, 12, 80]} />
-            <meshBasicMaterial ref={outerRingMaterialRef} color={project.color} transparent depthWrite={false} />
+            <meshBasicMaterial
+              ref={outerRingMaterialRef}
+              color={project.color}
+              transparent={!isNeutralNode}
+              opacity={isNeutralNode ? 1 : 0.22}
+              depthWrite
+              depthTest
+              blending={isNeutralNode ? THREE.NormalBlending : THREE.AdditiveBlending}
+              toneMapped={false}
+            />
           </mesh>
 
           <mesh
+            renderOrder={-18}
             onPointerOver={(event) => {
               event.stopPropagation()
               document.body.style.cursor = 'pointer'
@@ -561,15 +636,19 @@ function ProjectNode({
               onSelect(project.id)
             }}
           >
-            <icosahedronGeometry args={[0.25, 1]} />
+            <icosahedronGeometry args={[0.27, 1]} />
             <meshStandardMaterial
               ref={nodeMaterialRef}
               color={project.color}
               emissive={project.color}
               roughness={0.3}
               metalness={0.2}
-              transparent
-              depthWrite={false}
+              transparent={!isNeutralNode}
+              opacity={isNeutralNode ? 1 : 0.62}
+              depthWrite
+              depthTest
+              blending={isNeutralNode ? THREE.NormalBlending : THREE.AdditiveBlending}
+              toneMapped={false}
             />
           </mesh>
         </>
@@ -1291,6 +1370,100 @@ function CinematicLights({ project, reducedMotion }: { project: Project | null; 
   )
 }
 
+function NeutralStarField({ reducedMotion }: { reducedMotion: boolean }) {
+  const baseGroupRef = useRef<THREE.Group>(null)
+  const overlayGroupRef = useRef<THREE.Group>(null)
+  const baseMeshRef = useRef<THREE.InstancedMesh>(null)
+  const overlayMeshRef = useRef<THREE.InstancedMesh>(null)
+  const scratchObject = useMemo(() => new THREE.Object3D(), [])
+
+  const baseStars = useMemo(
+    () => createNeutralStarInstances('neutral-stars-base', 1842, 122, 28, [0.036, 0.084]),
+    [],
+  )
+  const overlayStars = useMemo(
+    () => createNeutralStarInstances('neutral-stars-overlay', 744, 94, 18, [0.058, 0.125]),
+    [],
+  )
+
+  useLayoutEffect(() => {
+    const applyInstances = (mesh: THREE.InstancedMesh | null, stars: NeutralStarInstances) => {
+      if (!mesh) {
+        return
+      }
+
+      for (let index = 0; index < stars.count; index += 1) {
+        const offset = index * 3
+        scratchObject.position.set(stars.positions[offset], stars.positions[offset + 1], stars.positions[offset + 2])
+        scratchObject.scale.setScalar(stars.scales[index])
+        scratchObject.updateMatrix()
+        mesh.setMatrixAt(index, scratchObject.matrix)
+      }
+
+      mesh.instanceMatrix.needsUpdate = true
+    }
+
+    applyInstances(baseMeshRef.current, baseStars)
+    applyInstances(overlayMeshRef.current, overlayStars)
+  }, [baseStars, overlayStars, scratchObject])
+
+  useFrame(({ clock }) => {
+    const elapsed = clock.getElapsedTime()
+
+    if (baseGroupRef.current) {
+      baseGroupRef.current.rotation.set(0, 0, 0)
+
+      if (!reducedMotion) {
+        baseGroupRef.current.rotation.y = elapsed * 0.008
+        baseGroupRef.current.rotation.x = Math.sin(elapsed * 0.045) * 0.014
+      }
+    }
+
+    if (overlayGroupRef.current) {
+      overlayGroupRef.current.rotation.set(0, 0, 0)
+
+      if (!reducedMotion) {
+        overlayGroupRef.current.rotation.y = -elapsed * 0.0065 + 1.1
+        overlayGroupRef.current.rotation.x = Math.cos(elapsed * 0.04) * 0.012
+      }
+    }
+  })
+
+  return (
+    <>
+      <group ref={baseGroupRef} renderOrder={-30} frustumCulled={false}>
+        <instancedMesh ref={baseMeshRef} args={[undefined, undefined, baseStars.count]} frustumCulled={false}>
+          <sphereGeometry args={[1, 6, 6]} />
+          <meshBasicMaterial
+            color="#e8f1ff"
+            transparent={false}
+            depthWrite={false}
+            depthTest
+            blending={THREE.NormalBlending}
+            fog={false}
+            toneMapped={false}
+          />
+        </instancedMesh>
+      </group>
+
+      <group ref={overlayGroupRef} renderOrder={-29} frustumCulled={false}>
+        <instancedMesh ref={overlayMeshRef} args={[undefined, undefined, overlayStars.count]} frustumCulled={false}>
+          <sphereGeometry args={[1, 6, 6]} />
+          <meshBasicMaterial
+            color="#f6fbff"
+            transparent={false}
+            depthWrite={false}
+            depthTest
+            blending={THREE.NormalBlending}
+            fog={false}
+            toneMapped={false}
+          />
+        </instancedMesh>
+      </group>
+    </>
+  )
+}
+
 function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotion }: ConstellationSceneProps) {
   const [hoveredProjectId, setHoveredProjectId] = useState<string | null>(null)
   const [visualActiveProjectId, setVisualActiveProjectId] = useState<string | null>(activeProjectId)
@@ -1300,6 +1473,26 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
   const pendingVisualProjectIdRef = useRef<string | null | undefined>(undefined)
 
   const connections = useMemo(() => buildConnections(projects), [projects])
+  const connectionVisuals = useMemo<ConnectionVisual[]>(
+    () =>
+      connections.map((connection) => {
+        const start = new THREE.Vector3(...connection.points[0])
+        const end = new THREE.Vector3(...connection.points[1])
+        const segment = end.clone().sub(start)
+        const length = Math.max(segment.length(), 0.001)
+        const direction = segment.clone().normalize()
+        const midpoint = start.clone().addScaledVector(segment, 0.5)
+        const quaternion = new THREE.Quaternion().setFromUnitVectors(WORLD_UP, direction)
+
+        return {
+          ...connection,
+          midpoint: [midpoint.x, midpoint.y, midpoint.z],
+          quaternion: [quaternion.x, quaternion.y, quaternion.z, quaternion.w],
+          length,
+        }
+      }),
+    [connections],
+  )
 
   const activeProject = useMemo(
     () => (activeProjectId ? projects.find((project) => project.id === activeProjectId) ?? null : null),
@@ -1329,6 +1522,8 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
     return 0.18 + (1 - smoothstep(0.08, 0.62, transitionProgress)) * 0.62
   }, [visualActiveProjectId, reducedMotion, transitionProgress])
 
+  const fogFar = visualActiveProjectId ? 44 : 128
+
   const activeConnectionColor = useMemo(() => {
     if (!visualActiveProject) {
       return '#7489a8'
@@ -1338,6 +1533,7 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
     color.offsetHSL(0, -0.08, 0.14)
     return `#${color.getHexString()}`
   }, [visualActiveProject])
+  const neutralConnectionColor = '#5f7ba1'
 
   useEffect(() => {
     if (reducedMotion) {
@@ -1363,22 +1559,12 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
 
   return (
     <>
-      <color attach="background" args={['#020611']} />
-      <fog attach="fog" args={['#020611', 10, 44]} />
+      <color attach="background" args={['#070708']} />
+      <fog attach="fog" args={['#070708', 10, fogFar]} />
 
       <CinematicLights project={visualActiveProject} reducedMotion={reducedMotion} />
 
-      <Stars
-        radius={60}
-        depth={45}
-        count={reducedMotion ? 800 : 1700}
-        factor={4.3}
-        saturation={0}
-        fade
-        speed={reducedMotion ? 0 : 0.24}
-      />
-
-      {connections.map((connection) => {
+      {connectionVisuals.map((connection) => {
         const showAllConnections = !visualActiveProjectId && !hoveredProjectId
         const linkedToSelection =
           showAllConnections ||
@@ -1392,14 +1578,20 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
         }
 
         return (
-          <Line
-            key={connection.id}
-            points={connection.points}
-            color={activeConnectionColor}
-            transparent
-            opacity={mapVisibility * 0.56}
-            lineWidth={1.0}
-          />
+          <group key={connection.id}>
+            <mesh position={connection.midpoint} quaternion={connection.quaternion} renderOrder={-20}>
+              <cylinderGeometry args={[0.012, 0.012, connection.length, 8, 1, true]} />
+              <meshBasicMaterial
+                color={visualActiveProjectId ? activeConnectionColor : neutralConnectionColor}
+                transparent={Boolean(visualActiveProjectId)}
+                opacity={visualActiveProjectId ? mapVisibility * 0.52 : 1}
+                depthWrite
+                depthTest
+                blending={THREE.NormalBlending}
+                toneMapped={false}
+              />
+            </mesh>
+          </group>
         )
       })}
 
@@ -1425,6 +1617,8 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
           transitionProgress={transitionProgress}
         />
       )}
+
+      <NeutralStarField reducedMotion={reducedMotion} />
 
       <OrbitControls
         ref={controlsRef}

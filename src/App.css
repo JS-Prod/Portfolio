@@ -10,9 +10,9 @@
   inset: 0;
   z-index: 0;
   background:
-    radial-gradient(circle at 16% 20%, rgba(112, 174, 255, 0.16), transparent 34%),
-    radial-gradient(circle at 85% 15%, rgba(255, 170, 122, 0.16), transparent 30%),
-    #030811;
+    radial-gradient(circle at 16% 20%, rgba(142, 136, 126, 0.12), transparent 36%),
+    radial-gradient(circle at 85% 15%, rgba(118, 108, 98, 0.1), transparent 34%),
+    #070708;
 }
 
 .scene-layer::after {
@@ -39,8 +39,9 @@
   left: 1.1rem;
   width: min(32rem, calc(100vw - 2.2rem));
   border: 1px solid rgba(154, 196, 244, 0.24);
-  background: rgba(5, 10, 21, 0.58);
-  backdrop-filter: blur(7px);
+  background: rgba(5, 10, 21, 0.44);
+  backdrop-filter: blur(12px) saturate(120%);
+  -webkit-backdrop-filter: blur(12px) saturate(120%);
   border-radius: 0.9rem;
   padding: 0.85rem 1rem;
   pointer-events: none;
@@ -108,14 +109,15 @@
 
 .project-panel {
   border-radius: 0.95rem;
-  background: rgba(4, 10, 19, 0.82);
+  background: rgba(4, 10, 19, 0.66);
   border: 1px solid rgba(155, 198, 247, 0.26);
   box-shadow: var(--shadow-heavy);
   padding: 0.95rem;
   display: flex;
   flex-direction: column;
   gap: 0.68rem;
-  backdrop-filter: blur(8px);
+  backdrop-filter: blur(14px) saturate(122%);
+  -webkit-backdrop-filter: blur(14px) saturate(122%);
 }
 
 .panel-kicker {
