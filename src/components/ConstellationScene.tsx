@@ -1,4 +1,4 @@
-import { Center, Html, OrbitControls, Text3D } from '@react-three/drei'
+import { Html, OrbitControls } from '@react-three/drei'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
@@ -36,6 +36,7 @@ type ProjectNodeProps = {
   mapVisibility: number
   nodeDisplayMode: 'neutral' | 'background'
   neutralBlendOverride: number | null
+  introReveal: number
   reducedMotion: boolean
   onHover: (projectId: string | null) => void
   onSelect: (projectId: string | null) => void
@@ -74,13 +75,7 @@ type HeroParticleField = {
 
 type NeutralStarInstances = {
   positions: Float32Array
-  xOffsets: Float32Array
-  yOffsets: Float32Array
-  depths: Float32Array
-  speeds: Float32Array
-  phases: Float32Array
   scales: Float32Array
-  driftRange: number
   count: number
 }
 
@@ -99,8 +94,6 @@ type CinematicBloomProps = {
 const CONNECTION_DISTANCE = 6.2
 const WORLD_UP = new THREE.Vector3(0, 1, 0)
 const X_AXIS = new THREE.Vector3(1, 0, 0)
-const HERO_TEXT_FONT = '/fonts/helvetiker_bold.typeface.json'
-
 const CORE_VERTEX_SHADER = `
 varying vec3 vNormal;
 varying vec3 vWorldPos;
@@ -245,40 +238,26 @@ function createRandom(seed: number) {
 function createNeutralStarInstances(
   seed: string,
   count: number,
-  spreadX: number,
-  spreadY: number,
-  depthRange: [number, number],
-  driftSpeedRange: [number, number],
+  radius: number,
+  depthSpread: number,
   sizeRange: [number, number],
 ): NeutralStarInstances {
   const random = createRandom(getHash(seed) + count * 13)
   const positions = new Float32Array(count * 3)
-  const xOffsets = new Float32Array(count)
-  const yOffsets = new Float32Array(count)
-  const depths = new Float32Array(count)
-  const speeds = new Float32Array(count)
-  const phases = new Float32Array(count)
   const scales = new Float32Array(count)
-  const [minDepth, maxDepth] = depthRange
-  const [minSpeed, maxSpeed] = driftSpeedRange
-  const driftRange = spreadX * 1.22
 
   for (let index = 0; index < count; index += 1) {
     const offset = index * 3
-    const x = (random() * 2 - 1) * spreadX
-    const y = (random() * 2 - 1) * spreadY
-    const depth = minDepth + random() * (maxDepth - minDepth)
-    const speedVariance = random() > 0.96 ? 1.35 + random() * 0.18 : 1
+    const u = random()
+    const v = random()
+    const theta = u * Math.PI * 2
+    const phi = Math.acos(2 * v - 1)
+    const shellRadius = radius + (random() - 0.5) * depthSpread
+    const sinPhi = Math.sin(phi)
 
-    xOffsets[index] = x
-    yOffsets[index] = y
-    depths[index] = depth
-    speeds[index] = (minSpeed + random() * (maxSpeed - minSpeed)) * speedVariance
-    phases[index] = random() * Math.PI * 2
-
-    positions[offset] = x
-    positions[offset + 1] = y
-    positions[offset + 2] = -depth
+    positions[offset] = shellRadius * sinPhi * Math.cos(theta)
+    positions[offset + 1] = shellRadius * Math.cos(phi)
+    positions[offset + 2] = shellRadius * sinPhi * Math.sin(theta)
 
     const [minScale, maxScale] = sizeRange
     const sparkle = random()
@@ -294,13 +273,7 @@ function createNeutralStarInstances(
 
   return {
     positions,
-    xOffsets,
-    yOffsets,
-    depths,
-    speeds,
-    phases,
     scales,
-    driftRange,
     count,
   }
 }
@@ -383,16 +356,16 @@ function getHeroStyle(project: Project): HeroStyle {
   }
 }
 
-function getHeroCoreLabel(project: Project) {
-  if (project.id === 'gpgpu-particles') {
-    return 'GPGPU'
+function HeroCoreGeometry({ kind }: { kind: HeroKind }) {
+  if (kind === 'harmonic') {
+    return <torusKnotGeometry args={[0.31, 0.11, 180, 28, 2, 3]} />
   }
 
-  if (project.id === 'voyce') {
-    return 'VOYCE'
+  if (kind === 'pulse') {
+    return <octahedronGeometry args={[0.56, 0]} />
   }
 
-  return 'TONE TAP'
+  return <icosahedronGeometry args={[0.52, 0]} />
 }
 
 function createParticleField(style: HeroStyle, seed: string): HeroParticleField {
@@ -560,6 +533,7 @@ function ProjectNode({
   mapVisibility,
   nodeDisplayMode,
   neutralBlendOverride,
+  introReveal,
   reducedMotion,
   onHover,
   onSelect,
@@ -598,6 +572,8 @@ function ProjectNode({
     neutralBlendRef.current = THREE.MathUtils.lerp(neutralBlendRef.current, isActive ? 0 : neutralTarget, neutralBlendLerp)
     const neutralBlend = neutralBlendRef.current
     const neutralModeOpacity = neutralBlendOverride === null ? 1 : neutralBlend
+    const introVisibility = clamp01(introReveal)
+    const introFlash = Math.exp(-Math.pow(introVisibility - 0.72, 2) / 0.014)
     const pulseAmplitude = THREE.MathUtils.lerp(0.024, 0.048, neutralBlend)
     const pulse = reducedMotion ? 0 : Math.sin(elapsed * 2 + phaseOffset) * pulseAmplitude
 
@@ -605,7 +581,8 @@ function ProjectNode({
 
     const baseScale = THREE.MathUtils.lerp(0.88, 1.26, neutralBlend)
     const hoverScale = isHovered ? THREE.MathUtils.lerp(0.1, 0.16, neutralBlend) : 0
-    const targetScale = baseScale + hoverScale
+    const introScale = isNeutralNode ? introVisibility * (0.95 + introFlash * 0.12) : 1
+    const targetScale = (baseScale + hoverScale) * introScale
     scaleTargetRef.setScalar(targetScale + pulse)
     groupRef.current.scale.lerp(scaleTargetRef, scaleLerp)
 
@@ -628,22 +605,24 @@ function ProjectNode({
       const neutralEmissiveBoost = isHovered ? 0.32 : 0.24
 
       nodeMaterialRef.current.opacity = isNeutralNode
-        ? neutralModeOpacity
+        ? neutralModeOpacity * introVisibility
         : mapVisibility * (baseOpacity + neutralBlend * neutralOpacityBoost)
-      nodeMaterialRef.current.emissiveIntensity = mapVisibility * (baseEmissive + neutralBlend * neutralEmissiveBoost)
+      nodeMaterialRef.current.emissiveIntensity = mapVisibility * (baseEmissive + neutralBlend * neutralEmissiveBoost) * (isNeutralNode ? (0.24 + introVisibility * 0.76 + introFlash * 0.28) : 1)
     }
 
     if (ringMaterialRef.current) {
       const baseRingOpacity = isHovered ? 0.22 : 0.13
       const neutralRingBoost = isHovered ? 0.34 : 0.3
       ringMaterialRef.current.opacity = isNeutralNode
-        ? neutralModeOpacity
+        ? neutralModeOpacity * introVisibility * (0.88 + introFlash * 0.24)
         : mapVisibility * (baseRingOpacity + neutralBlend * neutralRingBoost)
     }
 
     if (outerRingMaterialRef.current) {
       const outerOpacity = isHovered ? 0.28 : 0.18
-      outerRingMaterialRef.current.opacity = isNeutralNode ? neutralModeOpacity : mapVisibility * outerOpacity * neutralBlend
+      outerRingMaterialRef.current.opacity = isNeutralNode
+        ? neutralModeOpacity * introVisibility * (0.82 + introFlash * 0.22)
+        : mapVisibility * outerOpacity * neutralBlend
     }
   })
 
@@ -726,7 +705,7 @@ function ProjectNode({
 }
 
 function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOnFadeOut }: HeroWorldProps) {
-  const { gl, camera } = useThree()
+  const { gl } = useThree()
   const groupRef = useRef<THREE.Group>(null)
   const coreRef = useRef<THREE.Object3D>(null)
   const shellRef = useRef<THREE.Mesh>(null)
@@ -743,27 +722,22 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
   const accentScaleTargetRef = useMemo(() => new THREE.Vector3(1, 1, 1), [])
   const groupScaleTargetRef = useMemo(() => new THREE.Vector3(1, 1, 1), [])
   const presenceRef = useRef(clamp01(presenceTarget))
-  const coreLookTargetRef = useMemo(() => new THREE.Vector3(), [])
-  const coreWorldPositionRef = useMemo(() => new THREE.Vector3(), [])
-  const coreCurrentQuaternionRef = useMemo(() => new THREE.Quaternion(), [])
-  const coreTargetQuaternionRef = useMemo(() => new THREE.Quaternion(), [])
 
   const style = useMemo(() => getHeroStyle(project), [project])
-  const coreLabel = useMemo(() => getHeroCoreLabel(project), [project])
-  const coreTextSize = useMemo(() => (coreLabel.length > 7 ? 0.16 : 0.21), [coreLabel])
-  const coreTextHeight = useMemo(() => (coreLabel.length > 7 ? 0.056 : 0.074), [coreLabel])
-  const coreTextBevelSize = useMemo(() => (coreLabel.length > 7 ? 0.006 : 0.008), [coreLabel])
-  const coreTextOffsetY = useMemo(() => (coreLabel.length > 7 ? -0.05 : -0.032), [coreLabel])
   const particles = useMemo(() => createParticleField(style, `${project.id}-hero-swarm`), [style, project.id])
   const accentColor = useMemo(() => new THREE.Color(style.accent), [style.accent])
   const secondaryColor = useMemo(() => new THREE.Color(style.secondary), [style.secondary])
   const centerOccluderRadius = useMemo(() => {
-    if (coreLabel.length > 7) {
-      return 0.62
+    if (style.kind === 'harmonic') {
+      return 0.54
     }
 
-    return 0.52
-  }, [coreLabel])
+    if (style.kind === 'pulse') {
+      return 0.6
+    }
+
+    return 0.58
+  }, [style.kind])
 
   const accentBaseOpacity = useMemo(() => {
     if (style.kind === 'harmonic') {
@@ -848,18 +822,11 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
     }
 
     if (coreRef.current) {
-      const lookLerp = 1 - Math.exp(-(reducedMotion ? 16 : 9.8) * frameDelta)
-
-      coreRef.current.getWorldPosition(coreWorldPositionRef)
-      coreLookTargetRef.copy(camera.position)
-      // Keep text upright by only yawing toward camera.
-      coreLookTargetRef.y = coreWorldPositionRef.y
-
-      coreCurrentQuaternionRef.copy(coreRef.current.quaternion)
-      coreRef.current.lookAt(coreLookTargetRef)
-      coreTargetQuaternionRef.copy(coreRef.current.quaternion)
-      coreRef.current.quaternion.copy(coreCurrentQuaternionRef)
-      coreRef.current.quaternion.slerp(coreTargetQuaternionRef, lookLerp)
+      coreRef.current.rotation.x += frameDelta * (reducedMotion ? 0.08 : 0.14)
+      coreRef.current.rotation.y += frameDelta * (reducedMotion ? 0.14 : 0.24)
+      if (style.kind === 'harmonic') {
+        coreRef.current.rotation.z += frameDelta * (reducedMotion ? 0.06 : 0.12)
+      }
     }
 
     if (shellRef.current) {
@@ -946,23 +913,10 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
         <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
       </mesh>
 
-      <group ref={coreMaskRef} renderOrder={-40}>
-        <Center position={[0, coreTextOffsetY, 0]}>
-          <Text3D
-            font={HERO_TEXT_FONT}
-            size={coreTextSize}
-            height={coreTextHeight}
-            curveSegments={18}
-            bevelEnabled
-            bevelSize={coreTextBevelSize}
-            bevelThickness={coreTextBevelSize * 1.6}
-            bevelSegments={6}
-          >
-            {coreLabel}
-            <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
-          </Text3D>
-        </Center>
-      </group>
+      <mesh ref={coreMaskRef} renderOrder={-40}>
+        <HeroCoreGeometry kind={style.kind} />
+        <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
+      </mesh>
 
       <mesh
         ref={shellMaskRef}
@@ -980,11 +934,11 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       {style.kind === 'storm' && (
         <group ref={shellAccentMaskRef} renderOrder={-40}>
           <mesh rotation={[Math.PI / 2, 0, 0]}>
-            <torusGeometry args={[1.1, 0.03, 16, 120]} />
+            <torusGeometry args={[1.65, 0.03, 16, 120]} />
             <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
           </mesh>
           <mesh rotation={[Math.PI / 2, Math.PI / 5, 0]}>
-            <torusGeometry args={[0.9, 0.024, 16, 120]} />
+            <torusGeometry args={[1.37, 0.024, 16, 120]} />
             <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
           </mesh>
         </group>
@@ -993,11 +947,11 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       {style.kind === 'harmonic' && (
         <group ref={shellAccentMaskRef} renderOrder={-40}>
           <mesh rotation={[Math.PI / 2, 0.06, 0]}>
-            <torusGeometry args={[1.1, 0.026, 12, 120]} />
+            <torusGeometry args={[1.65, 0.026, 12, 120]} />
             <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
           </mesh>
           <mesh rotation={[Math.PI / 2, Math.PI / 5, 0]}>
-            <torusGeometry args={[0.9, 0.022, 12, 120]} />
+            <torusGeometry args={[1.37, 0.022, 12, 120]} />
             <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
           </mesh>
         </group>
@@ -1006,43 +960,30 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       {style.kind === 'pulse' && (
         <group ref={shellAccentMaskRef} renderOrder={-40}>
           <mesh rotation={[Math.PI / 2, 0, 0]}>
-            <torusGeometry args={[0.9, 0.024, 10, 90]} />
+            <torusGeometry args={[1.37, 0.024, 10, 90]} />
             <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
           </mesh>
           <mesh rotation={[Math.PI / 2, Math.PI / 5, 0]}>
-            <torusGeometry args={[1.02, 0.02, 10, 90]} />
+            <torusGeometry args={[1.65, 0.02, 10, 90]} />
             <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
           </mesh>
         </group>
       )}
 
-      <group ref={coreRef}>
-        <Center position={[0, coreTextOffsetY, 0]}>
-          <Text3D
-            font={HERO_TEXT_FONT}
-            size={coreTextSize}
-            height={coreTextHeight}
-            curveSegments={18}
-            bevelEnabled
-            bevelSize={coreTextBevelSize}
-            bevelThickness={coreTextBevelSize * 1.6}
-            bevelSegments={6}
-          >
-            {coreLabel}
-            <shaderMaterial
-              ref={coreMaterialRef}
-              uniforms={coreUniforms}
-              vertexShader={CORE_VERTEX_SHADER}
-              fragmentShader={CORE_FRAGMENT_SHADER}
-              transparent
-              depthTest={false}
-              depthWrite={false}
-              blending={THREE.AdditiveBlending}
-              toneMapped={false}
-            />
-          </Text3D>
-        </Center>
-      </group>
+      <mesh ref={coreRef}>
+        <HeroCoreGeometry kind={style.kind} />
+        <shaderMaterial
+          ref={coreMaterialRef}
+          uniforms={coreUniforms}
+          vertexShader={CORE_VERTEX_SHADER}
+          fragmentShader={CORE_FRAGMENT_SHADER}
+          transparent
+          depthTest={false}
+          depthWrite={false}
+          blending={THREE.AdditiveBlending}
+          toneMapped={false}
+        />
+      </mesh>
 
       <mesh
         ref={shellRef}
@@ -1070,7 +1011,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       {style.kind === 'storm' && (
         <group ref={shellAccentRef}>
           <mesh rotation={[Math.PI / 2, 0, 0]}>
-            <torusGeometry args={[1.1, 0.018, 16, 120]} />
+            <torusGeometry args={[1.65, 0.018, 16, 120]} />
             <meshBasicMaterial
               ref={accentPrimaryMaterialRef}
               color={style.accent}
@@ -1082,7 +1023,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
             />
           </mesh>
           <mesh rotation={[Math.PI / 2, Math.PI / 5, 0]}>
-            <torusGeometry args={[0.9, 0.015, 16, 120]} />
+            <torusGeometry args={[1.37, 0.015, 16, 120]} />
             <meshBasicMaterial
               ref={accentSecondaryMaterialRef}
               color={style.secondary}
@@ -1099,7 +1040,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       {style.kind === 'harmonic' && (
         <group ref={shellAccentRef}>
           <mesh rotation={[Math.PI / 2, 0.06, 0]}>
-            <torusGeometry args={[1.1, 0.018, 12, 120]} />
+            <torusGeometry args={[1.65, 0.018, 12, 120]} />
             <meshBasicMaterial
               ref={accentPrimaryMaterialRef}
               color={style.accent}
@@ -1111,7 +1052,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
             />
           </mesh>
           <mesh rotation={[Math.PI / 2, Math.PI / 5, 0]}>
-            <torusGeometry args={[0.9, 0.015, 12, 120]} />
+            <torusGeometry args={[1.37, 0.015, 12, 120]} />
             <meshBasicMaterial
               ref={accentSecondaryMaterialRef}
               color={style.secondary}
@@ -1128,7 +1069,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       {style.kind === 'pulse' && (
         <group ref={shellAccentRef}>
           <mesh rotation={[Math.PI / 2, 0, 0]}>
-            <torusGeometry args={[0.9, 0.018, 10, 90]} />
+            <torusGeometry args={[1.37, 0.018, 10, 90]} />
             <meshBasicMaterial
               ref={accentPrimaryMaterialRef}
               color={style.accent}
@@ -1140,7 +1081,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
             />
           </mesh>
           <mesh rotation={[Math.PI / 2, Math.PI / 5, 0]}>
-            <torusGeometry args={[1.02, 0.014, 10, 90]} />
+            <torusGeometry args={[1.65, 0.014, 10, 90]} />
             <meshBasicMaterial
               ref={accentSecondaryMaterialRef}
               color={style.secondary}
@@ -1260,12 +1201,15 @@ function CameraRig({
   const transitionTargetRef = useRef(new THREE.Vector3())
   const transitionDirectionRef = useRef(new THREE.Vector3())
   const fallbackAxisRef = useRef(new THREE.Vector3(1, 0, 0))
+  const introSwayAxisRef = useRef(new THREE.Vector3(1, 0, 0))
 
   const orbitCameraOffsetRef = useRef(new THREE.Vector3())
   const orbitTargetOffsetRef = useRef(new THREE.Vector3())
 
   const progressRef = useRef(1)
   const isTransitioningRef = useRef(true)
+  const isInitialNeutralTransitionRef = useRef(false)
+  const hasInitializedRef = useRef(false)
   const isUserInteractingRef = useRef(false)
   const halfwayNotifiedRef = useRef(false)
   const wasDampingEnabledRef = useRef(true)
@@ -1405,9 +1349,6 @@ function CameraRig({
     const sideAmount = isNeutral ? (size.width < 900 ? 0.22 : 0.28) : size.width < 900 ? 0.4 : 0.52 + maxDistanceToOthers * 0.12
     const verticalLift = (size.width < 900 ? 0.42 : 0.6) + verticalBoost
 
-    startTargetRef.current.copy(controls?.target ?? active)
-    startCameraRef.current.copy(camera.position)
-
     const target = active.clone()
     const baseCameraPosition = active.clone().sub(towardOthers.clone().multiplyScalar(distance))
     const plusSide = baseCameraPosition.clone().add(side.clone().multiplyScalar(sideAmount)).add(new THREE.Vector3(0, verticalLift, 0))
@@ -1450,9 +1391,45 @@ function CameraRig({
 
     target.add(lookOffset)
 
+    const shouldUseInitialNeutralTransition = !hasInitializedRef.current && isNeutral && !reducedMotion
+
+    if (shouldUseInitialNeutralTransition) {
+      const finalViewDirection = cameraPosition.clone().sub(target).normalize()
+      const introSide = new THREE.Vector3().crossVectors(finalViewDirection, WORLD_UP)
+
+      if (introSide.lengthSq() < 0.0001) {
+        introSide.copy(X_AXIS)
+      }
+
+      introSide.normalize()
+      introSwayAxisRef.current.copy(introSide)
+
+      const introDistance = size.width < 900 ? 1.6 : 2.2
+      const introSideOffset = size.width < 900 ? -0.22 : -0.36
+      const introLift = size.width < 900 ? 0.24 : 0.34
+
+      startCameraRef.current
+        .copy(cameraPosition)
+        .addScaledVector(finalViewDirection, introDistance)
+        .addScaledVector(introSide, introSideOffset)
+        .addScaledVector(WORLD_UP, introLift)
+
+      startTargetRef.current
+        .copy(target)
+        .addScaledVector(introSide, introSideOffset * 0.7)
+        .addScaledVector(WORLD_UP, introLift * 0.44)
+
+      isInitialNeutralTransitionRef.current = true
+    } else {
+      startTargetRef.current.copy(controls?.target ?? active)
+      startCameraRef.current.copy(camera.position)
+      isInitialNeutralTransitionRef.current = false
+    }
+
     endTargetRef.current.copy(target)
     endCameraRef.current.copy(cameraPosition)
     activeAnchorRef.current.copy(active)
+    hasInitializedRef.current = true
 
     const startOffset = startCameraRef.current.clone().sub(startTargetRef.current)
     const endOffset = endCameraRef.current.clone().sub(endTargetRef.current)
@@ -1523,7 +1500,15 @@ function CameraRig({
     controls.enableDamping = false
 
     const frameDelta = reducedMotion ? delta : Math.min(delta, 1 / 30)
-    const duration = reducedMotion ? 0.01 : size.width < 900 ? 1.75 : 2.35
+    const duration = reducedMotion
+      ? 0.01
+      : isInitialNeutralTransitionRef.current
+        ? size.width < 900
+          ? 2.0
+          : 2.25
+        : size.width < 900
+          ? 1.75
+          : 2.35
     const nextProgress = Math.min(1, progressRef.current + frameDelta / duration)
     progressRef.current = nextProgress
     onTransitionProgress?.(nextProgress)
@@ -1533,8 +1518,14 @@ function CameraRig({
       onTransitionHalfway?.()
     }
 
-    const eased = easeInOutCubic(nextProgress)
-    const arcLift = reducedMotion ? 0 : Math.sin(Math.PI * eased) * (size.width < 900 ? 0.08 : 0.24)
+    const eased = isInitialNeutralTransitionRef.current
+      ? smoothstep(0, 1, nextProgress)
+      : easeInOutCubic(nextProgress)
+    const arcLift = reducedMotion
+      ? 0
+      : isInitialNeutralTransitionRef.current
+        ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.04 : 0.08)
+        : Math.sin(Math.PI * eased) * (size.width < 900 ? 0.08 : 0.24)
 
     transitionTargetRef.current.lerpVectors(startTargetRef.current, endTargetRef.current, eased)
     controls.target.copy(transitionTargetRef.current)
@@ -1564,9 +1555,17 @@ function CameraRig({
     }
 
     const radius = THREE.MathUtils.lerp(startOffsetRadiusRef.current, endOffsetRadiusRef.current, eased)
-    const cinematicDolly = reducedMotion ? 0 : Math.sin(Math.PI * eased) * (size.width < 900 ? 0.44 : 0.94)
+    const cinematicDolly = reducedMotion
+      ? 0
+      : isInitialNeutralTransitionRef.current
+        ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.08 : 0.14)
+        : Math.sin(Math.PI * eased) * (size.width < 900 ? 0.44 : 0.94)
 
     camera.position.copy(transitionTargetRef.current).addScaledVector(transitionDirectionRef.current, radius + cinematicDolly)
+    if (isInitialNeutralTransitionRef.current) {
+      const introSway = Math.sin(Math.PI * eased) * (size.width < 900 ? 0.035 : 0.055)
+      camera.position.addScaledVector(introSwayAxisRef.current, introSway)
+    }
     camera.position.addScaledVector(WORLD_UP, arcLift)
     camera.lookAt(transitionTargetRef.current)
     camera.updateMatrixWorld()
@@ -1580,7 +1579,8 @@ function CameraRig({
       isTransitioningRef.current = false
       onTransitionProgress?.(1)
       orbitResumeRef.current = 0
-      arrivalHoldRef.current = reducedMotion ? 0 : 0.22
+      arrivalHoldRef.current = reducedMotion ? 0 : isInitialNeutralTransitionRef.current ? 0.08 : 0.22
+      isInitialNeutralTransitionRef.current = false
       controls.enabled = true
       controls.enableDamping = wasDampingEnabledRef.current
       controls.target.copy(transitionTargetRef.current)
@@ -1698,23 +1698,18 @@ function CinematicLights({ project, reducedMotion }: { project: Project | null; 
 }
 
 function NeutralStarField({ reducedMotion }: { reducedMotion: boolean }) {
-  const camera = useThree((state) => state.camera)
-  const baseAnchorRef = useRef<THREE.Group>(null)
-  const overlayAnchorRef = useRef<THREE.Group>(null)
-  const baseDriftRef = useRef<THREE.Group>(null)
-  const overlayDriftRef = useRef<THREE.Group>(null)
-  const baseMeshRefs = useRef<Array<THREE.InstancedMesh | null>>([])
-  const overlayMeshRefs = useRef<Array<THREE.InstancedMesh | null>>([])
+  const baseGroupRef = useRef<THREE.Group>(null)
+  const overlayGroupRef = useRef<THREE.Group>(null)
+  const baseMeshRef = useRef<THREE.InstancedMesh>(null)
+  const overlayMeshRef = useRef<THREE.InstancedMesh>(null)
   const scratchObject = useMemo(() => new THREE.Object3D(), [])
-  const tileOffsets = useMemo(() => [-1, 0, 1], [])
-  const tileSpan = 260
 
   const neutralBaseStars = useMemo(
-    () => createNeutralStarInstances('neutral-stars-base', 1680, 130, 78, [84, 132], [0.62, 1.06], [0.036, 0.084]),
+    () => createNeutralStarInstances('neutral-stars-base', 1842, 122, 28, [0.036, 0.084]),
     [],
   )
   const neutralOverlayStars = useMemo(
-    () => createNeutralStarInstances('neutral-stars-overlay', 640, 118, 66, [72, 112], [0.82, 1.28], [0.054, 0.118]),
+    () => createNeutralStarInstances('neutral-stars-overlay', 744, 94, 18, [0.058, 0.125]),
     [],
   )
 
@@ -1738,90 +1733,54 @@ function NeutralStarField({ reducedMotion }: { reducedMotion: boolean }) {
   )
 
   useLayoutEffect(() => {
-    baseMeshRefs.current.forEach((mesh) => applyInstances(mesh, neutralBaseStars))
-    overlayMeshRefs.current.forEach((mesh) => applyInstances(mesh, neutralOverlayStars))
-  }, [applyInstances, neutralBaseStars, neutralOverlayStars, tileOffsets])
+    applyInstances(baseMeshRef.current, neutralBaseStars)
+    applyInstances(overlayMeshRef.current, neutralOverlayStars)
+  }, [applyInstances, neutralBaseStars, neutralOverlayStars])
 
   useFrame(({ clock }) => {
     const elapsed = clock.getElapsedTime()
-    const baseShift = reducedMotion ? 0 : (elapsed * 0.84) % tileSpan
-    const overlayShift = reducedMotion ? 0 : (elapsed * 1.02) % tileSpan
 
-    if (baseAnchorRef.current) {
-      baseAnchorRef.current.position.copy(camera.position)
-      baseAnchorRef.current.quaternion.copy(camera.quaternion)
+    if (baseGroupRef.current) {
+      baseGroupRef.current.rotation.y = reducedMotion ? 0 : elapsed * 0.006
+      baseGroupRef.current.rotation.x = reducedMotion ? 0 : Math.sin(elapsed * 0.03) * 0.012
     }
 
-    if (overlayAnchorRef.current) {
-      overlayAnchorRef.current.position.copy(camera.position)
-      overlayAnchorRef.current.quaternion.copy(camera.quaternion)
-    }
-
-    if (baseDriftRef.current) {
-      baseDriftRef.current.position.x = baseShift
-      baseDriftRef.current.position.y = reducedMotion ? 0 : Math.sin(elapsed * 0.09) * 0.35
-    }
-
-    if (overlayDriftRef.current) {
-      overlayDriftRef.current.position.x = overlayShift
-      overlayDriftRef.current.position.y = reducedMotion ? 0 : Math.cos(elapsed * 0.12) * 0.46
+    if (overlayGroupRef.current) {
+      overlayGroupRef.current.rotation.y = reducedMotion ? 0 : -elapsed * 0.0048 + 0.4
+      overlayGroupRef.current.rotation.x = reducedMotion ? 0 : Math.cos(elapsed * 0.028) * 0.01
     }
   })
 
   return (
     <>
-      <group ref={baseAnchorRef} renderOrder={-30} frustumCulled={false}>
-        <group ref={baseDriftRef}>
-          {tileOffsets.map((tileOffset, tileIndex) => (
-            <group key={`base-tile-${tileOffset}`} position={[tileOffset * tileSpan, 0, 0]}>
-              <instancedMesh
-                ref={(mesh) => {
-                  baseMeshRefs.current[tileIndex] = mesh
-                }}
-                args={[undefined, undefined, neutralBaseStars.count]}
-                frustumCulled={false}
-              >
-                <sphereGeometry args={[1, 6, 6]} />
-                <meshBasicMaterial
-                  color="#e8f1ff"
-                  transparent={false}
-                  depthWrite={false}
-                  depthTest
-                  blending={THREE.NormalBlending}
-                  fog={false}
-                  toneMapped={false}
-                />
-              </instancedMesh>
-            </group>
-          ))}
-        </group>
+      <group ref={baseGroupRef} renderOrder={-30} frustumCulled={false}>
+        <instancedMesh ref={baseMeshRef} args={[undefined, undefined, neutralBaseStars.count]} frustumCulled={false}>
+          <sphereGeometry args={[2, 6, 6]} />
+          <meshBasicMaterial
+            color="#e8f1ff"
+            transparent={false}
+            depthWrite={false}
+            depthTest
+            blending={THREE.NormalBlending}
+            fog={false}
+            toneMapped={false}
+          />
+        </instancedMesh>
       </group>
 
-      <group ref={overlayAnchorRef} renderOrder={-29} frustumCulled={false}>
-        <group ref={overlayDriftRef}>
-          {tileOffsets.map((tileOffset, tileIndex) => (
-            <group key={`overlay-tile-${tileOffset}`} position={[tileOffset * tileSpan, 0, 0]}>
-              <instancedMesh
-                ref={(mesh) => {
-                  overlayMeshRefs.current[tileIndex] = mesh
-                }}
-                args={[undefined, undefined, neutralOverlayStars.count]}
-                frustumCulled={false}
-              >
-                <sphereGeometry args={[1, 6, 6]} />
-                <meshBasicMaterial
-                  color="#f6fbff"
-                  transparent={false}
-                  depthWrite={false}
-                  depthTest
-                  blending={THREE.NormalBlending}
-                  fog={false}
-                  toneMapped={false}
-                />
-              </instancedMesh>
-            </group>
-          ))}
-        </group>
+      <group ref={overlayGroupRef} renderOrder={-29} frustumCulled={false}>
+        <instancedMesh ref={overlayMeshRef} args={[undefined, undefined, neutralOverlayStars.count]} frustumCulled={false}>
+          <sphereGeometry args={[2, 6, 6]} />
+          <meshBasicMaterial
+            color="#f6fbff"
+            transparent={false}
+            depthWrite={false}
+            depthTest
+            blending={THREE.NormalBlending}
+            fog={false}
+            toneMapped={false}
+          />
+        </instancedMesh>
       </group>
     </>
   )
@@ -1832,9 +1791,11 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
   const [visualActiveProjectId, setVisualActiveProjectId] = useState<string | null>(activeProjectId)
   const [outgoingHeroProjectId, setOutgoingHeroProjectId] = useState<string | null>(null)
   const [transitionProgress, setTransitionProgress] = useState(1)
+  const [initialRevealProgress, setInitialRevealProgress] = useState(reducedMotion ? 1 : 0)
 
   const controlsRef = useRef<OrbitControlsImpl | null>(null)
   const visualProjectIdRef = useRef<string | null>(activeProjectId)
+  const initialRevealRef = useRef(reducedMotion ? 1 : 0)
 
   const connections = useMemo(() => buildConnections(projects), [projects])
   const connectionVisuals = useMemo<ConnectionVisual[]>(
@@ -1980,6 +1941,22 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
     return `#${color.getHexString()}`
   }, [visualActiveProject])
   const neutralConnectionColor = '#5f7ba1'
+  const introRevealActive = useMemo(
+    () => !reducedMotion && !visualActiveProjectId && initialRevealProgress < 0.999,
+    [initialRevealProgress, reducedMotion, visualActiveProjectId],
+  )
+
+  useFrame((_state, delta) => {
+    if (reducedMotion || visualActiveProjectId || initialRevealRef.current >= 1) {
+      return
+    }
+
+    const frameDelta = Math.min(delta, 1 / 30)
+    const duration = 2.2
+    const next = Math.min(1, initialRevealRef.current + frameDelta / duration)
+    initialRevealRef.current = next
+    setInitialRevealProgress((previous) => (Math.abs(previous - next) > 0.002 ? next : previous))
+  })
 
   useEffect(() => {
     const previousVisualId = visualProjectIdRef.current
@@ -2001,6 +1978,13 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
     setTransitionProgress(0)
     visualProjectIdRef.current = activeProjectId
   }, [activeProjectId, reducedMotion])
+
+  useEffect(() => {
+    if (reducedMotion || visualActiveProjectId) {
+      initialRevealRef.current = 1
+      setInitialRevealProgress(1)
+    }
+  }, [reducedMotion, visualActiveProjectId])
 
   const handleTransitionProgress = useCallback((progress: number) => {
     setTransitionProgress((previous) => {
@@ -2035,7 +2019,7 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
 
       <CinematicLights project={visualActiveProject} reducedMotion={reducedMotion} />
 
-      {connectionVisuals.map((connection) => {
+      {connectionVisuals.map((connection, connectionIndex) => {
         const showAllConnections = !visualActiveProjectId && !hoveredProjectId
         const linkedToSelection =
           showAllConnections ||
@@ -2048,25 +2032,79 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
           return null
         }
 
+        const lineReveal = introRevealActive
+          ? smoothstep(0, 1, clamp01((initialRevealProgress - connectionIndex * 0.045) / 0.42))
+          : 1
+
+        const [sx, sy, sz] = connection.points[0]
+        const [ex, ey, ez] = connection.points[1]
+        const start = new THREE.Vector3(sx, sy, sz)
+        const end = new THREE.Vector3(ex, ey, ez)
+        const direction = end.sub(start).normalize()
+        const renderedLength = Math.max(0.001, connection.length * lineReveal)
+        let renderedMidpoint: Vector3 = connection.midpoint
+
+        if (introRevealActive) {
+          const center = start.clone().addScaledVector(direction, renderedLength * 0.5)
+          renderedMidpoint = [center.x, center.y, center.z]
+        }
+
+        const baseOpacity = visualActiveProjectId ? mapVisibility * 0.52 : 1
+        const lineOpacity = baseOpacity * (introRevealActive ? lineReveal : 1)
+
+        const tracerProgress = introRevealActive
+          ? clamp01((initialRevealProgress - 0.08 - connectionIndex * 0.05) / 0.52)
+          : 1
+        const tracerLength = Math.min(0.6, connection.length * 0.24)
+        const tracerOpacity = introRevealActive ? (1 - smoothstep(0.7, 1, tracerProgress)) * 0.92 : 0
+        const tracerStart = tracerLength * 0.5
+        const tracerEnd = Math.max(tracerStart, connection.length - tracerLength * 0.5)
+        const tracerDistance = THREE.MathUtils.lerp(tracerStart, tracerEnd, tracerProgress)
+        const tracerCenter = start.clone().addScaledVector(direction, tracerDistance)
+
         return (
           <group key={connection.id}>
-            <mesh position={connection.midpoint} quaternion={connection.quaternion} renderOrder={-20}>
-              <cylinderGeometry args={[0.012, 0.012, connection.length, 8, 1, true]} />
+            <mesh position={renderedMidpoint} quaternion={connection.quaternion} renderOrder={-20}>
+              <cylinderGeometry args={[0.012, 0.012, renderedLength, 8, 1, true]} />
               <meshBasicMaterial
                 color={visualActiveProjectId ? activeConnectionColor : neutralConnectionColor}
-                transparent={Boolean(visualActiveProjectId)}
-                opacity={visualActiveProjectId ? mapVisibility * 0.52 : 1}
+                transparent={Boolean(visualActiveProjectId) || lineOpacity < 0.999}
+                opacity={lineOpacity}
                 depthWrite
                 depthTest
                 blending={THREE.NormalBlending}
                 toneMapped={false}
               />
             </mesh>
+
+            {tracerOpacity > 0.004 && (
+              <mesh
+                position={[tracerCenter.x, tracerCenter.y, tracerCenter.z]}
+                quaternion={connection.quaternion}
+                renderOrder={-19}
+              >
+                <cylinderGeometry args={[0.018, 0.018, tracerLength, 10, 1, true]} />
+                <meshBasicMaterial
+                  color="#d9ecff"
+                  transparent
+                  opacity={tracerOpacity}
+                  depthWrite={false}
+                  depthTest
+                  blending={THREE.AdditiveBlending}
+                  toneMapped={false}
+                />
+              </mesh>
+            )}
           </group>
         )
       })}
 
-      {projects.map((project) => (
+      {projects.map((project, projectIndex) => {
+        const nodeReveal = introRevealActive
+          ? smoothstep(0, 1, clamp01((initialRevealProgress - (0.43 + projectIndex * 0.15)) / 0.34))
+          : 1
+
+        return (
         <ProjectNode
           key={project.id}
           project={project}
@@ -2075,11 +2113,13 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
           mapVisibility={mapVisibility}
           nodeDisplayMode={!visualActiveProjectId ? 'neutral' : 'background'}
           neutralBlendOverride={lowFiNeutralBlendOverride}
+          introReveal={nodeReveal}
           reducedMotion={reducedMotion}
           onHover={setHoveredProjectId}
           onSelect={handleNodeSelect}
         />
-      ))}
+        )
+      })}
 
       {outgoingHeroProject && outgoingHeroPresence > 0.004 && (
         <HeroWorld
