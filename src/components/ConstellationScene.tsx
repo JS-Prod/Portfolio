@@ -251,11 +251,12 @@ void main() {
   float wisps = smoothstep(0.24, 0.9, cloud);
   float core = smoothstep(0.0, 0.55, radial);
   float sparkle = 0.9 + sin(dot(vWorldPos, vec3(1.2, 0.7, 1.5)) + uTime * 0.65) * 0.1;
-  float alpha = (wisps * radial * 0.9 + core * 0.28) * uOpacity * sparkle;
-  alpha = clamp(alpha, 0.0, 0.92);
+  float alpha = (wisps * radial * 0.78 + core * 0.22) * uOpacity * sparkle;
+  alpha = clamp(alpha, 0.0, 0.68);
 
   vec3 color = mix(uSecondary, uColor, 0.3 + cloud * 0.7);
-  color *= 0.4 + cloud * 0.9 + core * 0.26;
+  color *= 0.28 + cloud * 0.62 + core * 0.16;
+  color = mix(color, vec3(1.0), core * 0.03);
 
   gl_FragColor = vec4(color, alpha);
 }
@@ -1526,17 +1527,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
 
     return { core: 1.0, shell: 0.8, ringsPrimary: 1.08, ringsSecondary: 1.0, particles: 1.22 }
   }, [style.kind])
-  const coreDustRadius = useMemo(() => {
-    if (style.kind === 'harmonic') {
-      return 0.72
-    }
-
-    if (style.kind === 'pulse') {
-      return 0.68
-    }
-
-    return 0.7
-  }, [style.kind])
+  const coreDustRadius = useMemo(() => style.shellScale * 0.25, [style.shellScale])
   const coreDustUniforms = useMemo(
     () => ({
       uTime: { value: 0 },
@@ -1696,15 +1687,19 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       coreStarBlockerRef.current.rotation.copy(coreRef.current.rotation)
     }
 
-    if (coreRef.current && coreDustGroupRef.current) {
-      coreDustGroupRef.current.rotation.copy(coreRef.current.rotation)
-      const cloudPulse = 1 + Math.sin(elapsed * 0.48 + (style.kind === 'harmonic' ? 0.8 : style.kind === 'pulse' ? 1.4 : 0.2)) * 0.04 * intensity
-      coreDustGroupRef.current.scale.setScalar(cloudPulse)
-    }
-
     if (shellRef.current) {
       shellRef.current.rotation.y += frameDelta * (reducedMotion ? 0.024 : 0.108)
       shellRef.current.rotation.z += frameDelta * (reducedMotion ? 0.021 : 0.066)
+    }
+
+    if (shellRef.current && coreDustGroupRef.current) {
+      coreDustGroupRef.current.rotation.copy(shellRef.current.rotation)
+      const cloudPulse =
+        1 +
+        Math.sin(elapsed * 0.52 + (style.kind === 'harmonic' ? 0.8 : style.kind === 'pulse' ? 1.4 : 0.2)) *
+          0.035 *
+          intensity
+      coreDustGroupRef.current.scale.setScalar(cloudPulse)
     }
 
     if (shellAccentRef.current) {
@@ -1794,6 +1789,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
     updateParticleField(streamParticles, style, elapsed * 0.5, frameDelta, intensity, collapseParticlesOnFadeOut)
 
     const collapseBlend = collapseParticlesOnFadeOut ? smoothstep(0.02, 0.8, intensity) : 1
+
     if (streamRibbonRef.current) {
       updateEtherealFilamentSimulation(etherealFilaments, elapsed, frameDelta, collapseBlend, reducedMotion)
       updateEtherealFilamentGeometry(etherealFilaments)
@@ -1852,10 +1848,10 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
 
     if (coreDustMaterialRef.current) {
       coreDustMaterialRef.current.uniforms.uTime.value = elapsed
-      coreDustMaterialRef.current.uniforms.uColor.value.copy(secondaryColor).lerp(accentColor, 0.2)
-      coreDustMaterialRef.current.uniforms.uSecondary.value.copy(accentColor).lerp(secondaryColor, 0.34)
+      coreDustMaterialRef.current.uniforms.uColor.value.copy(secondaryColor).lerp(accentColor, 0.4)
+      coreDustMaterialRef.current.uniforms.uSecondary.value.copy(accentColor).lerp(secondaryColor, 0.24)
       coreDustMaterialRef.current.uniforms.uOpacity.value =
-        (0.34 + intensity * 0.7) * intensity * silhouetteProfile.core * (reducedMotion ? 0.85 : 1)
+        (0.24 + intensity * 0.46) * intensity * silhouetteProfile.core * (reducedMotion ? 0.88 : 1)
     }
 
     if (accentPrimaryMaterialRef.current) {
@@ -1882,6 +1878,8 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
         <icosahedronGeometry args={[style.shellScale, 1]} />
         <meshBasicMaterial
           colorWrite={false}
+          transparent
+          opacity={0}
           depthWrite
           depthTest
           side={THREE.FrontSide}
@@ -2107,7 +2105,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
           vertexShader={SHELL_VERTEX_SHADER}
           fragmentShader={SHELL_FRAGMENT_SHADER}
           transparent
-          depthTest={false}
+          depthTest
           depthWrite={false}
           blending={THREE.AdditiveBlending}
           wireframe
@@ -2234,7 +2232,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
 
       <group ref={coreDustGroupRef}>
         <mesh renderOrder={-13} frustumCulled={false}>
-          <icosahedronGeometry args={[coreDustRadius, 7]} />
+          <icosahedronGeometry args={[coreDustRadius, 1]} />
           <shaderMaterial
             ref={coreDustMaterialRef}
             uniforms={coreDustUniforms}
