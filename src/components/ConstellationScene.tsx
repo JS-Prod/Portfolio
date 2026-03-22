@@ -3,7 +3,15 @@ import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import * as THREE from 'three'
-import { EffectComposer, RenderPass, UnrealBloomPass } from 'three-stdlib'
+import {
+  EffectComposer,
+  FilmPass,
+  RGBShiftShader,
+  RenderPass,
+  ShaderPass,
+  UnrealBloomPass,
+  VignetteShader,
+} from 'three-stdlib'
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 
 import type { Project } from '../data/projects'
@@ -63,14 +71,36 @@ type HeroStyle = {
 }
 
 type HeroParticleField = {
+  profile: 'stream' | 'dust'
   positions: Float32Array
+  velocities: Float32Array
   basePositions: Float32Array
   speeds: Float32Array
   phases: Float32Array
   radii: Float32Array
+  bands: Float32Array
+  lifts: Float32Array
   sizes: Float32Array
   flickers: Float32Array
   count: number
+}
+
+type FlowRibbonField = {
+  ribbonCount: number
+  segmentCount: number
+  phases: Float32Array
+  speeds: Float32Array
+  radii: Float32Array
+  lifts: Float32Array
+  twists: Float32Array
+  widths: Float32Array
+  geometry: THREE.BufferGeometry
+  positionAttribute: THREE.BufferAttribute
+}
+
+type WireTraceGraph = {
+  nodes: THREE.Vector3[]
+  adjacency: number[][]
 }
 
 type NeutralStarInstances = {
@@ -94,6 +124,7 @@ type CinematicBloomProps = {
 const CONNECTION_DISTANCE = 6.2
 const WORLD_UP = new THREE.Vector3(0, 1, 0)
 const X_AXIS = new THREE.Vector3(1, 0, 0)
+const WHITE = new THREE.Color('#ffffff')
 const CORE_VERTEX_SHADER = `
 varying vec3 vNormal;
 varying vec3 vWorldPos;
@@ -165,50 +196,254 @@ void main() {
 }
 `
 
-const PARTICLE_VERTEX_SHADER = `
+const LIQUID_RIBBON_VERTEX_SHADER = `
+varying vec2 vUv;
+
+void main() {
+  vUv = uv;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`
+
+const LIQUID_RIBBON_FRAGMENT_SHADER = `
+uniform vec3 uColor;
+uniform vec3 uSecondary;
+uniform float uTime;
+uniform float uOpacity;
+uniform float uIntensity;
+
+varying vec2 vUv;
+
+void main() {
+  float x = vUv.x * 2.0 - 1.0;
+  float body = exp(-pow(abs(x) / 0.66, 1.75));
+  float edgeSoft = 1.0 - smoothstep(0.82, 1.0, abs(x));
+  float head = smoothstep(0.0, 0.14, vUv.y);
+  float tail = 1.0 - smoothstep(0.86, 1.0, vUv.y);
+  float along = head * tail;
+
+  float ripple = sin(vUv.y * 8.0 - uTime * 1.2 + x * 1.1) * 0.5 + 0.5;
+  float filament = sin(vUv.y * 5.5 + uTime * 0.8 - x * 0.8) * 0.5 + 0.5;
+  float textureAlpha = 0.72 + ripple * 0.14 + filament * 0.08;
+  float alpha = along * body * edgeSoft * textureAlpha * uOpacity;
+  alpha = min(alpha, 0.44);
+
+  if (alpha < 0.0005) {
+    discard;
+  }
+
+  vec3 color = mix(uSecondary, uColor, 0.22 + body * 0.78);
+  color *= 0.78 + ripple * 0.14 + uIntensity * 0.22;
+
+  gl_FragColor = vec4(color, alpha);
+}
+`
+
+const STREAM_SWARM_VERTEX_SHADER = `
 attribute float aSize;
 attribute float aFlicker;
 
 uniform float uTime;
 uniform float uBaseSize;
-uniform float uPixelRatio;
 uniform float uIntensity;
 
 varying float vPulse;
-varying float vDepthFade;
+varying float vFlicker;
 
 void main() {
+  vFlicker = aFlicker;
   vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-  float twinkle = sin(uTime * (1.2 + aFlicker * 2.4) + aFlicker * 23.0) * 0.5 + 0.5;
-  vPulse = twinkle;
-  vDepthFade = clamp(1.0 - (-mvPosition.z / 26.0), 0.0, 1.0);
-  float size = (uBaseSize * aSize * (0.42 + twinkle * 0.78) * uPixelRatio * uIntensity) / max(0.08, -mvPosition.z);
-  gl_PointSize = size;
+  float pulse = sin(uTime * (0.9 + aFlicker * 1.9) + aFlicker * 21.0) * 0.5 + 0.5;
+  vPulse = pulse;
+  gl_PointSize = (uBaseSize * aSize * (0.75 + pulse * 0.5) * (0.25 + uIntensity * 0.75)) / max(0.08, -mvPosition.z);
   gl_Position = projectionMatrix * mvPosition;
 }
 `
 
-const PARTICLE_FRAGMENT_SHADER = `
+const STREAM_SWARM_FRAGMENT_SHADER = `
 uniform vec3 uColor;
 uniform float uOpacity;
 
 varying float vPulse;
-varying float vDepthFade;
+varying float vFlicker;
 
 void main() {
   vec2 centered = gl_PointCoord * 2.0 - 1.0;
-  float distanceSquared = dot(centered, centered);
+  float r2 = dot(centered, centered);
 
-  if (distanceSquared > 1.0) {
+  if (r2 > 1.0) {
     discard;
   }
 
-  float falloff = exp(-distanceSquared * 3.25);
-  float edge = smoothstep(1.0, 0.0, distanceSquared);
-  float glow = falloff * edge * (0.45 + vPulse * 0.5) * (0.52 + vDepthFade * 0.48);
-  vec3 color = uColor * (0.74 + vPulse * 0.2);
+  float core = exp(-r2 * 7.5);
+  float halo = exp(-r2 * 2.8);
+  float sparkle = 0.9 + sin(vFlicker * 41.0 + r2 * 8.0) * 0.1;
+  float alpha = (core * 0.72 + halo * 0.28) * (0.72 + vPulse * 0.28) * sparkle * uOpacity;
+  vec3 color = uColor * (0.78 + vPulse * 0.22 + (1.0 - r2) * 0.22);
+  gl_FragColor = vec4(color, alpha);
+}
+`
 
-  gl_FragColor = vec4(color, glow * uOpacity);
+function createParticleTexture(kind: 'liquid' | 'dust' | 'spark') {
+  const size = 128
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const ctx = canvas.getContext('2d')
+
+  if (!ctx) {
+    const fallback = new THREE.Texture()
+    fallback.needsUpdate = true
+    return fallback
+  }
+
+  ctx.clearRect(0, 0, size, size)
+
+  if (kind === 'liquid') {
+    ctx.save()
+    ctx.translate(size * 0.5, size * 0.5)
+    ctx.rotate(-0.6)
+
+    const drop = ctx.createLinearGradient(-size * 0.4, 0, size * 0.5, 0)
+    drop.addColorStop(0, 'rgba(255,255,255,0)')
+    drop.addColorStop(0.3, 'rgba(255,255,255,0.44)')
+    drop.addColorStop(0.65, 'rgba(255,255,255,0.92)')
+    drop.addColorStop(1, 'rgba(255,255,255,0)')
+    ctx.fillStyle = drop
+    ctx.beginPath()
+    ctx.moveTo(-size * 0.42, 0)
+    ctx.bezierCurveTo(-size * 0.16, -size * 0.18, size * 0.16, -size * 0.14, size * 0.42, 0)
+    ctx.bezierCurveTo(size * 0.16, size * 0.14, -size * 0.16, size * 0.18, -size * 0.42, 0)
+    ctx.closePath()
+    ctx.fill()
+
+    const highlight = ctx.createRadialGradient(size * 0.08, -size * 0.04, 0, size * 0.08, -size * 0.04, size * 0.16)
+    highlight.addColorStop(0, 'rgba(255,255,255,0.96)')
+    highlight.addColorStop(1, 'rgba(255,255,255,0)')
+    ctx.fillStyle = highlight
+    ctx.beginPath()
+    ctx.arc(size * 0.08, -size * 0.04, size * 0.16, 0, Math.PI * 2)
+    ctx.fill()
+
+    const wake = ctx.createLinearGradient(-size * 0.46, 0, -size * 0.06, 0)
+    wake.addColorStop(0, 'rgba(255,255,255,0)')
+    wake.addColorStop(1, 'rgba(255,255,255,0.4)')
+    ctx.fillStyle = wake
+    ctx.beginPath()
+    ctx.ellipse(-size * 0.24, 0, size * 0.3, size * 0.08, 0, 0, Math.PI * 2)
+    ctx.fill()
+
+    ctx.restore()
+  } else if (kind === 'dust') {
+    const random = createRandom(9327)
+    const base = ctx.createRadialGradient(size * 0.5, size * 0.5, 0, size * 0.5, size * 0.5, size * 0.5)
+    base.addColorStop(0, 'rgba(255,255,255,0.18)')
+    base.addColorStop(0.5, 'rgba(255,255,255,0.08)')
+    base.addColorStop(1, 'rgba(255,255,255,0)')
+    ctx.fillStyle = base
+    ctx.beginPath()
+    ctx.arc(size * 0.5, size * 0.5, size * 0.5, 0, Math.PI * 2)
+    ctx.fill()
+
+    for (let i = 0; i < 20; i += 1) {
+      const x = size * (0.16 + random() * 0.68)
+      const y = size * (0.16 + random() * 0.68)
+      const r = size * (0.13 + random() * 0.24)
+      const alpha = 0.06 + random() * 0.08
+      const cloud = ctx.createRadialGradient(x, y, 0, x, y, r)
+      cloud.addColorStop(0, `rgba(255,255,255,${alpha})`)
+      cloud.addColorStop(0.72, `rgba(255,255,255,${alpha * 0.42})`)
+      cloud.addColorStop(1, 'rgba(255,255,255,0)')
+      ctx.fillStyle = cloud
+      ctx.beginPath()
+      ctx.arc(x, y, r, 0, Math.PI * 2)
+      ctx.fill()
+    }
+  } else {
+    const star = ctx.createRadialGradient(size * 0.5, size * 0.5, 0, size * 0.5, size * 0.5, size * 0.5)
+    star.addColorStop(0, 'rgba(255,255,255,1)')
+    star.addColorStop(0.26, 'rgba(255,255,255,0.95)')
+    star.addColorStop(0.6, 'rgba(255,255,255,0.3)')
+    star.addColorStop(1, 'rgba(255,255,255,0)')
+    ctx.fillStyle = star
+    ctx.beginPath()
+    ctx.arc(size * 0.5, size * 0.5, size * 0.5, 0, Math.PI * 2)
+    ctx.fill()
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)'
+    ctx.lineWidth = 2
+    ctx.beginPath()
+    ctx.moveTo(size * 0.5, size * 0.12)
+    ctx.lineTo(size * 0.5, size * 0.88)
+    ctx.moveTo(size * 0.12, size * 0.5)
+    ctx.lineTo(size * 0.88, size * 0.5)
+    ctx.stroke()
+  }
+
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.wrapS = THREE.ClampToEdgeWrapping
+  texture.wrapT = THREE.ClampToEdgeWrapping
+  texture.generateMipmaps = true
+  texture.needsUpdate = true
+  return texture
+}
+
+const NEBULA_VERTEX_SHADER = `
+varying vec2 vUv;
+
+void main() {
+  vUv = uv;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`
+
+const NEBULA_FRAGMENT_SHADER = `
+uniform float uTime;
+uniform vec3 uColor;
+uniform float uOpacity;
+uniform float uScale;
+
+varying vec2 vUv;
+
+float hash(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+float noise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+
+  return mix(
+    mix(hash(i + vec2(0.0, 0.0)), hash(i + vec2(1.0, 0.0)), u.x),
+    mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x),
+    u.y
+  );
+}
+
+float fbm(vec2 p) {
+  float value = 0.0;
+  float amplitude = 0.5;
+
+  for (int i = 0; i < 4; i++) {
+    value += amplitude * noise(p);
+    p = p * 2.03 + vec2(17.3, 9.2);
+    amplitude *= 0.5;
+  }
+
+  return value;
+}
+
+void main() {
+  vec2 centered = vUv * 2.0 - 1.0;
+  float radial = 1.0 - smoothstep(0.18, 1.08, length(centered));
+  vec2 flow = vUv * uScale + vec2(uTime * 0.007, -uTime * 0.005);
+  float cloud = fbm(flow) * 0.65 + fbm(flow * 1.8 + vec2(4.0, 1.6)) * 0.35;
+  float wisps = smoothstep(0.4, 0.9, cloud) * radial;
+  float alpha = wisps * uOpacity * (0.28 + radial * 0.72);
+  vec3 color = uColor * (0.3 + cloud * 0.7);
+
+  gl_FragColor = vec4(color, alpha);
 }
 `
 
@@ -295,6 +530,10 @@ function easeInOutCubic(value: number) {
   return value < 0.5 ? 4 * value * value * value : 1 - ((-2 * value + 2) ** 3) / 2
 }
 
+function easeInOutSine(value: number) {
+  return -(Math.cos(Math.PI * value) - 1) / 2
+}
+
 function buildConnections(projects: Project[]): Connection[] {
   const connections: Connection[] = []
 
@@ -368,63 +607,281 @@ function HeroCoreGeometry({ kind }: { kind: HeroKind }) {
   return <icosahedronGeometry args={[0.52, 0]} />
 }
 
-function createParticleField(style: HeroStyle, seed: string): HeroParticleField {
-  const count = style.swarmCount
+function createParticleField(style: HeroStyle, seed: string, profile: 'stream' | 'dust'): HeroParticleField {
+  const profileScale =
+    profile === 'stream'
+      ? style.kind === 'harmonic'
+        ? 0.24
+        : 0.27
+      : style.kind === 'storm'
+        ? 0.22
+        : 0.2
+  const count =
+    profile === 'stream'
+      ? Math.max(170, Math.round(style.swarmCount * profileScale))
+      : Math.max(56, Math.round(style.swarmCount * profileScale * 0.4))
   const positions = new Float32Array(count * 3)
+  const velocities = new Float32Array(count * 3)
   const basePositions = new Float32Array(count * 3)
   const speeds = new Float32Array(count)
   const phases = new Float32Array(count)
   const radii = new Float32Array(count)
+  const bands = new Float32Array(count)
+  const lifts = new Float32Array(count)
   const sizes = new Float32Array(count)
   const flickers = new Float32Array(count)
-  const random = createRandom(getHash(seed) + count)
+  const random = createRandom(getHash(seed) + count + (profile === 'stream' ? 77 : 131))
+  const strandCount = style.kind === 'storm' ? 18 : style.kind === 'harmonic' ? 16 : 14
 
   for (let index = 0; index < count; index += 1) {
     const offset = index * 3
     const angle = random() * Math.PI * 2
-    const t = index / Math.max(count - 1, 1)
 
     phases[index] = random() * Math.PI * 2
-    speeds[index] = 0.35 + random() * 0.85
+    speeds[index] = profile === 'stream' ? 0.74 + random() * 1.16 : 0.18 + random() * 0.48
     flickers[index] = random()
-    sizes[index] = 0.78 + random() * 1.3
+    bands[index] = (index % strandCount) / strandCount
+    lifts[index] = random() * 2 - 1
 
-    if (style.kind === 'storm') {
-      const phi = Math.acos(1 - 2 * random())
-      const spread = 0.24 + Math.pow(random(), 1.1) * 2.25
-      basePositions[offset] = Math.sin(phi) * Math.cos(angle)
-      basePositions[offset + 1] = Math.cos(phi)
-      basePositions[offset + 2] = Math.sin(phi) * Math.sin(angle)
-      radii[index] = spread
-    } else if (style.kind === 'harmonic') {
-      const turns = 8.2
-      const helixAngle = t * Math.PI * turns + random() * 0.35
-      const radius = 0.24 + random() * 1.1
-      basePositions[offset] = Math.cos(helixAngle) * radius
-      basePositions[offset + 1] = (t - 0.5) * 4.1 + (random() - 0.5) * 0.2
-      basePositions[offset + 2] = Math.sin(helixAngle) * radius
-      radii[index] = radius
+    if (profile === 'stream') {
+      const bandPhase = bands[index] * Math.PI * 2
+      const streamRadius =
+        style.kind === 'storm' ? 1.2 + random() * 1.2 : style.kind === 'harmonic' ? 1.0 + random() * 1.0 : 1.1 + random() * 1.1
+      const streamLift = (random() - 0.5) * (style.kind === 'harmonic' ? 1.4 : 0.9)
+
+      basePositions[offset] = Math.cos(bandPhase) * streamRadius
+      basePositions[offset + 1] = streamLift
+      basePositions[offset + 2] = Math.sin(bandPhase) * streamRadius
+
+      radii[index] = streamRadius
+      sizes[index] = 0.8 + random() * 1.36
     } else {
-      const spread = 0.16 + Math.pow(random(), 1.15) * 2.6
-      basePositions[offset] = Math.cos(angle) * spread
-      basePositions[offset + 1] = (random() - 0.5) * spread * 0.42
-      basePositions[offset + 2] = Math.sin(angle) * spread
+      const phi = Math.acos(1 - 2 * random())
+      const spread = style.kind === 'harmonic' ? 0.6 + Math.pow(random(), 1.25) * 1.8 : 0.7 + Math.pow(random(), 1.2) * 2.1
+
+      basePositions[offset] = Math.sin(phi) * Math.cos(angle) * spread
+      basePositions[offset + 1] = Math.cos(phi) * spread * (style.kind === 'harmonic' ? 1.35 : 1.0)
+      basePositions[offset + 2] = Math.sin(phi) * Math.sin(angle) * spread
+
       radii[index] = spread
+      sizes[index] = 1.0 + random() * 1.45
     }
   }
 
   positions.set(basePositions)
 
   return {
+    profile,
     positions,
+    velocities,
     basePositions,
     speeds,
     phases,
     radii,
+    bands,
+    lifts,
     sizes,
     flickers,
     count,
   }
+}
+
+function createFlowRibbonField(style: HeroStyle, seed: string): FlowRibbonField {
+  const random = createRandom(getHash(seed) + 4096)
+  const ribbonCount = 3
+  const segmentCount = style.kind === 'storm' ? 42 : style.kind === 'harmonic' ? 46 : 42
+  const phases = new Float32Array(ribbonCount)
+  const speeds = new Float32Array(ribbonCount)
+  const radii = new Float32Array(ribbonCount)
+  const lifts = new Float32Array(ribbonCount)
+  const twists = new Float32Array(ribbonCount)
+  const widths = new Float32Array(ribbonCount)
+  const vertexCount = ribbonCount * segmentCount * 2
+  const positions = new Float32Array(vertexCount * 3)
+  const uvs = new Float32Array(vertexCount * 2)
+  const indices = new Uint16Array(ribbonCount * (segmentCount - 1) * 6)
+
+  let indexOffset = 0
+
+  for (let ribbon = 0; ribbon < ribbonCount; ribbon += 1) {
+    phases[ribbon] = random() * Math.PI * 2
+    speeds[ribbon] = 0.55 + random() * 1.15
+    radii[ribbon] = style.kind === 'harmonic' ? 0.9 + random() * 0.85 : 1.0 + random() * 1.0
+    lifts[ribbon] = random() * 2 - 1
+    twists[ribbon] = random() * 1.1 + 0.25
+    widths[ribbon] = 0.65 + random() * 0.85
+
+    const ribbonVertexBase = ribbon * segmentCount * 2
+
+    for (let segment = 0; segment < segmentCount; segment += 1) {
+      const along = segment / (segmentCount - 1)
+      const leftVertex = ribbonVertexBase + segment * 2
+      const rightVertex = leftVertex + 1
+
+      uvs[leftVertex * 2] = 0
+      uvs[leftVertex * 2 + 1] = along
+      uvs[rightVertex * 2] = 1
+      uvs[rightVertex * 2 + 1] = along
+
+      if (segment === segmentCount - 1) {
+        continue
+      }
+
+      const nextLeft = leftVertex + 2
+      const nextRight = rightVertex + 2
+
+      indices[indexOffset] = leftVertex
+      indices[indexOffset + 1] = nextLeft
+      indices[indexOffset + 2] = rightVertex
+      indices[indexOffset + 3] = nextLeft
+      indices[indexOffset + 4] = nextRight
+      indices[indexOffset + 5] = rightVertex
+      indexOffset += 6
+    }
+  }
+
+  const positionAttribute = new THREE.BufferAttribute(positions, 3)
+  positionAttribute.setUsage(THREE.DynamicDrawUsage)
+
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', positionAttribute)
+  geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2))
+  geometry.setIndex(new THREE.BufferAttribute(indices, 1))
+  geometry.computeBoundingSphere()
+
+  return {
+    ribbonCount,
+    segmentCount,
+    phases,
+    speeds,
+    radii,
+    lifts,
+    twists,
+    widths,
+    geometry,
+    positionAttribute,
+  }
+}
+
+function createWireTraceGraph(shellScale: number): WireTraceGraph {
+  const sourceGeometry = new THREE.IcosahedronGeometry(shellScale, 1)
+  const edgesGeometry = new THREE.EdgesGeometry(sourceGeometry)
+  sourceGeometry.dispose()
+
+  const positions = edgesGeometry.attributes.position.array as Float32Array
+  const nodeMap = new Map<string, number>()
+  const nodes: THREE.Vector3[] = []
+  const adjacency: number[][] = []
+
+  const getNodeIndex = (x: number, y: number, z: number) => {
+    const key = `${x.toFixed(4)},${y.toFixed(4)},${z.toFixed(4)}`
+    const existing = nodeMap.get(key)
+
+    if (existing !== undefined) {
+      return existing
+    }
+
+    const index = nodes.length
+    nodes.push(new THREE.Vector3(x, y, z))
+    adjacency.push([])
+    nodeMap.set(key, index)
+    return index
+  }
+
+  const linkNodes = (a: number, b: number) => {
+    if (!adjacency[a].includes(b)) {
+      adjacency[a].push(b)
+    }
+
+    if (!adjacency[b].includes(a)) {
+      adjacency[b].push(a)
+    }
+  }
+
+  for (let offset = 0; offset < positions.length; offset += 6) {
+    const a = getNodeIndex(positions[offset], positions[offset + 1], positions[offset + 2])
+    const b = getNodeIndex(positions[offset + 3], positions[offset + 4], positions[offset + 5])
+
+    if (a !== b) {
+      linkNodes(a, b)
+    }
+  }
+
+  edgesGeometry.dispose()
+
+  return {
+    nodes,
+    adjacency,
+  }
+}
+
+function pickNextTraceNode(
+  graph: WireTraceGraph,
+  current: number,
+  previous: number,
+  random: () => number,
+): number {
+  const neighbors = graph.adjacency[current]
+
+  if (!neighbors || neighbors.length === 0) {
+    return current
+  }
+
+  const candidates = neighbors.filter((node) => node !== previous)
+
+  if (candidates.length === 0) {
+    return neighbors[Math.floor(random() * neighbors.length)]
+  }
+
+  return candidates[Math.floor(random() * candidates.length)]
+}
+
+function sampleRibbonPoint(
+  style: HeroStyle,
+  phase: number,
+  speed: number,
+  radius: number,
+  lift: number,
+  twist: number,
+  elapsed: number,
+  along: number,
+  spread: number,
+  target: THREE.Vector3,
+) {
+  const flow = elapsed * (0.5 + speed * 0.34) - along * (1.6 + twist * 1.1)
+
+  if (style.kind === 'storm') {
+    const swirl = phase + flow * 1.32
+    const radial = radius * (0.84 + Math.sin(elapsed * 0.72 + phase + along * 4.0) * 0.2)
+    target.set(
+      Math.cos(swirl) * radial + Math.sin(flow * 2.05 + phase * 1.3) * 0.26,
+      lift * 0.62 + Math.sin(flow * 1.42 + phase * 2.3) * (0.22 + radius * 0.08),
+      Math.sin(swirl) * radial + Math.cos(flow * 1.76 + phase * 0.9) * 0.24,
+    )
+    target.multiplyScalar(spread)
+    return
+  }
+
+  if (style.kind === 'harmonic') {
+    const helix = phase + flow * 1.06
+    const radial = radius * (0.74 + Math.sin(elapsed * 0.6 + along * 3.2 + phase) * 0.16)
+    target.set(
+      Math.cos(helix) * radial + Math.sin(flow * 1.5 + phase * 1.7) * 0.16,
+      lift * 0.86 + Math.sin(flow * 1.08 + phase) * 0.52 + Math.cos(flow * 0.82 + phase * 1.2) * 0.18,
+      Math.sin(helix) * radial + Math.cos(flow * 1.42 + phase * 1.6) * 0.16,
+    )
+    target.multiplyScalar(spread)
+    return
+  }
+
+  const figure = phase + flow * 1.14
+  const radial = radius * (0.76 + Math.sin(elapsed * 0.66 + along * 4.4 + phase) * 0.18)
+  target.set(
+    Math.sin(figure) * radial * 1.02 + Math.sin(flow * 1.64 + phase * 1.2) * 0.2,
+    lift * 0.5 + Math.sin(figure * 1.4) * (0.25 + radius * 0.07) + Math.cos(flow * 1.18 + phase) * 0.08,
+    Math.sin(figure * 1.92) * radial * 0.76 + Math.cos(flow * 1.54 + phase * 1.4) * 0.2,
+  )
+  target.multiplyScalar(spread)
 }
 
 function updateParticleField(
@@ -438,10 +895,14 @@ function updateParticleField(
   const clampedDelta = Math.min(delta, 1 / 24)
   const spread = collapseToCenter ? smoothstep(0.08, 0.64, intensity) : 1
   const collapse = 1 - spread
-  const smoothing = 1 - Math.exp(-(5.4 + intensity * 3.6 + collapse * 2.2) * clampedDelta)
+  const baseResponse = field.profile === 'stream' ? 8.2 : 5.6
+  const smoothing = 1 - Math.exp(-(baseResponse + intensity * 3.8 + collapse * 2.2) * clampedDelta)
 
   for (let index = 0; index < field.count; index += 1) {
     const offset = index * 3
+    const prevX = field.positions[offset]
+    const prevY = field.positions[offset + 1]
+    const prevZ = field.positions[offset + 2]
 
     const bx = field.basePositions[offset]
     const by = field.basePositions[offset + 1]
@@ -450,65 +911,110 @@ function updateParticleField(
     const phase = field.phases[index]
     const speed = field.speeds[index]
     const radius = field.radii[index]
+    const band = field.bands[index]
+    const lift = field.lifts[index]
 
-    if (style.kind === 'storm') {
-      const spin = elapsed * 0.2 * speed + phase
-      const pulse = 0.8 + Math.abs(Math.sin(elapsed * 0.6 + phase)) * (0.42 + intensity * 0.5)
-      const wave = Math.sin(elapsed * 0.85 + phase) * 0.1
-      const radial = radius * pulse
+    if (field.profile === 'stream') {
+      const streamAngle = band * Math.PI * 2 + phase * 0.25
+      const flow = elapsed * (0.92 + speed * 0.5) + phase * 1.6
+      const pulse = 0.82 + Math.sin(elapsed * 0.64 + phase) * 0.18 + intensity * 0.22
 
-      const targetX = Math.cos(spin) * radial + wave
-      const targetY = by * radial + Math.sin(elapsed * 0.8 + phase) * 0.16
-      const targetZ = Math.sin(spin) * radial + Math.cos(elapsed * 0.7 + phase) * 0.08
+      let targetX = 0
+      let targetY = 0
+      let targetZ = 0
+
+      if (style.kind === 'storm') {
+        const radial = radius * pulse
+        targetX = Math.cos(flow + streamAngle) * radial + Math.sin(flow * 1.9 + lift * 2.4) * 0.16
+        targetY = Math.sin(flow * 1.2 + streamAngle * 1.5) * (0.28 + radius * 0.12) + lift * 0.4
+        targetZ = Math.sin(flow + streamAngle) * radial + Math.cos(flow * 1.6 + band * 11.0) * 0.14
+      } else if (style.kind === 'harmonic') {
+        const helixRadius = radius * (0.68 + Math.sin(flow * 1.1 + phase) * 0.18)
+        targetX = Math.cos(flow * 1.1 + streamAngle) * helixRadius + Math.sin(flow * 1.7 + lift * 3.0) * 0.12
+        targetY = Math.sin(flow * 0.84 + streamAngle * 0.9) * 0.46 + lift * 0.88 + Math.cos(flow * 0.42 + band * 7.0) * 0.42
+        targetZ = Math.sin(flow * 1.1 + streamAngle) * helixRadius + Math.cos(flow * 1.4 + phase) * 0.1
+      } else {
+        const figure = flow * 0.9 + streamAngle
+        const radial = radius * (0.78 + Math.sin(flow * 1.35 + phase) * 0.2)
+        targetX = Math.sin(figure) * radial * 1.02 + Math.sin(flow * 1.8 + lift * 2.8) * 0.1
+        targetY = Math.sin(figure * 1.55) * (0.24 + radius * 0.1) + lift * 0.42
+        targetZ = Math.sin(figure * 2.1) * radial * 0.74 + Math.cos(flow * 1.5 + phase) * 0.12
+      }
 
       const finalX = targetX * spread
       const finalY = targetY * spread
       const finalZ = targetZ * spread
 
-      field.positions[offset] = THREE.MathUtils.lerp(field.positions[offset], finalX, smoothing)
-      field.positions[offset + 1] = THREE.MathUtils.lerp(field.positions[offset + 1], finalY, smoothing)
-      field.positions[offset + 2] = THREE.MathUtils.lerp(field.positions[offset + 2], finalZ, smoothing)
+      field.positions[offset] = THREE.MathUtils.lerp(prevX, finalX, smoothing)
+      field.positions[offset + 1] = THREE.MathUtils.lerp(prevY, finalY, smoothing)
+      field.positions[offset + 2] = THREE.MathUtils.lerp(prevZ, finalZ, smoothing)
+      const invDelta = 1 / Math.max(clampedDelta, 1 / 240)
+      field.velocities[offset] = THREE.MathUtils.lerp(
+        field.velocities[offset],
+        (field.positions[offset] - prevX) * invDelta,
+        0.56,
+      )
+      field.velocities[offset + 1] = THREE.MathUtils.lerp(
+        field.velocities[offset + 1],
+        (field.positions[offset + 1] - prevY) * invDelta,
+        0.56,
+      )
+      field.velocities[offset + 2] = THREE.MathUtils.lerp(
+        field.velocities[offset + 2],
+        (field.positions[offset + 2] - prevZ) * invDelta,
+        0.56,
+      )
       continue
     }
 
-    if (style.kind === 'harmonic') {
-      const spin = elapsed * 0.58 * speed + phase
-      const baseRadius = Math.max(Math.sqrt(bx * bx + bz * bz), 0.08)
-      const wobble = Math.sin(elapsed * 1.0 + phase) * (0.12 + intensity * 0.1)
-      const drift = 0.08 + Math.sin(elapsed * 0.7 + phase) * 0.1
-
-      const targetX = Math.cos(spin) * (baseRadius + drift)
-      const targetY = by + wobble
-      const targetZ = Math.sin(spin) * (baseRadius + drift)
-
-      const finalX = targetX * spread
-      const finalY = targetY * spread
-      const finalZ = targetZ * spread
-
-      field.positions[offset] = THREE.MathUtils.lerp(field.positions[offset], finalX, smoothing)
-      field.positions[offset + 1] = THREE.MathUtils.lerp(field.positions[offset + 1], finalY, smoothing)
-      field.positions[offset + 2] = THREE.MathUtils.lerp(field.positions[offset + 2], finalZ, smoothing)
-      continue
-    }
-
-    const beat = 0.84 + (Math.sin(elapsed * 0.95 + phase) * 0.5 + 0.5) * (0.42 + intensity * 0.36)
-    const spin = elapsed * 0.18 * speed
+    const spin = elapsed * (0.16 + speed * 0.18)
     const cos = Math.cos(spin)
     const sin = Math.sin(spin)
-    const sx = bx * cos - bz * sin
-    const sz = bx * sin + bz * cos
+    const swirlX = bx * cos - bz * sin
+    const swirlZ = bx * sin + bz * cos
+    const breathing = 0.84 + Math.sin(elapsed * 0.58 + phase) * 0.22 + intensity * 0.16
 
-    const targetX = sx * beat
-    const targetY = by * (0.82 + beat * 0.34) + Math.sin(elapsed * 0.85 + phase) * 0.07
-    const targetZ = sz * beat
+    let targetX = swirlX * breathing
+    let targetY = by * (0.78 + breathing * 0.36)
+    let targetZ = swirlZ * breathing
+
+    if (style.kind === 'harmonic') {
+      targetX += Math.sin(elapsed * 1.0 + phase * 1.8) * (0.12 + radius * 0.04)
+      targetY += Math.cos(elapsed * 0.7 + phase + lift * 2.0) * 0.22
+      targetZ += Math.cos(elapsed * 0.92 + phase * 2.2) * (0.12 + radius * 0.04)
+    } else if (style.kind === 'storm') {
+      targetX += Math.sin(elapsed * 1.2 + phase * 2.1 + band * 3.2) * 0.2
+      targetY += Math.sin(elapsed * 0.86 + phase + lift) * 0.14
+      targetZ += Math.cos(elapsed * 1.16 + phase * 1.7 + band * 2.8) * 0.2
+    } else {
+      targetX += Math.sin(elapsed * 0.95 + phase * 2.0) * 0.16
+      targetY += Math.cos(elapsed * 1.02 + phase + lift * 1.8) * 0.12
+      targetZ += Math.cos(elapsed * 1.08 + phase * 1.6) * 0.16
+    }
 
     const finalX = targetX * spread
     const finalY = targetY * spread
     const finalZ = targetZ * spread
 
-    field.positions[offset] = THREE.MathUtils.lerp(field.positions[offset], finalX, smoothing)
-    field.positions[offset + 1] = THREE.MathUtils.lerp(field.positions[offset + 1], finalY, smoothing)
-    field.positions[offset + 2] = THREE.MathUtils.lerp(field.positions[offset + 2], finalZ, smoothing)
+    field.positions[offset] = THREE.MathUtils.lerp(prevX, finalX, smoothing)
+    field.positions[offset + 1] = THREE.MathUtils.lerp(prevY, finalY, smoothing)
+    field.positions[offset + 2] = THREE.MathUtils.lerp(prevZ, finalZ, smoothing)
+    const invDelta = 1 / Math.max(clampedDelta, 1 / 240)
+    field.velocities[offset] = THREE.MathUtils.lerp(
+      field.velocities[offset],
+      (field.positions[offset] - prevX) * invDelta,
+      0.42,
+    )
+    field.velocities[offset + 1] = THREE.MathUtils.lerp(
+      field.velocities[offset + 1],
+      (field.positions[offset + 1] - prevY) * invDelta,
+      0.42,
+    )
+    field.velocities[offset + 2] = THREE.MathUtils.lerp(
+      field.velocities[offset + 2],
+      (field.positions[offset + 2] - prevZ) * invDelta,
+      0.42,
+    )
   }
 }
 
@@ -705,51 +1211,130 @@ function ProjectNode({
 }
 
 function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOnFadeOut }: HeroWorldProps) {
-  const { gl } = useThree()
+  const { camera } = useThree()
   const groupRef = useRef<THREE.Group>(null)
   const coreRef = useRef<THREE.Object3D>(null)
+  const coreMaskRef = useRef<THREE.Mesh>(null)
   const shellRef = useRef<THREE.Mesh>(null)
+  const shellStarBlockerRef = useRef<THREE.Mesh>(null)
+  const coreStarBlockerRef = useRef<THREE.Mesh>(null)
   const shellAccentRef = useRef<THREE.Object3D>(null)
-  const coreMaskRef = useRef<THREE.Object3D>(null)
+  const shellOcclusionRef = useRef<THREE.Mesh>(null)
   const shellMaskRef = useRef<THREE.Mesh>(null)
   const shellAccentMaskRef = useRef<THREE.Object3D>(null)
-  const pointsRef = useRef<THREE.Points>(null)
+  const shellTraceGroupRef = useRef<THREE.Group>(null)
+  const shellTraceSegmentRef = useRef<THREE.Mesh>(null)
+  const shellTraceCoreRef = useRef<THREE.Mesh>(null)
+  const streamRibbonRef = useRef<THREE.Mesh>(null)
+  const streamPointsRef = useRef<THREE.Points>(null)
+  const dustMeshRef = useRef<THREE.InstancedMesh>(null)
   const coreMaterialRef = useRef<THREE.ShaderMaterial>(null)
   const shellMaterialRef = useRef<THREE.ShaderMaterial>(null)
-  const particleMaterialRef = useRef<THREE.ShaderMaterial>(null)
+  const streamRibbonMaterialRef = useRef<THREE.ShaderMaterial>(null)
+  const streamSwarmMaterialRef = useRef<THREE.ShaderMaterial>(null)
+  const dustMaterialRef = useRef<THREE.MeshBasicMaterial>(null)
+  const traceSegmentMaterialRef = useRef<THREE.MeshBasicMaterial>(null)
+  const traceCoreMaterialRef = useRef<THREE.MeshBasicMaterial>(null)
   const accentPrimaryMaterialRef = useRef<THREE.MeshBasicMaterial>(null)
   const accentSecondaryMaterialRef = useRef<THREE.MeshBasicMaterial>(null)
   const accentScaleTargetRef = useMemo(() => new THREE.Vector3(1, 1, 1), [])
   const groupScaleTargetRef = useMemo(() => new THREE.Vector3(1, 1, 1), [])
+  const billboardObjectRef = useMemo(() => new THREE.Object3D(), [])
+  const cameraUpRef = useMemo(() => new THREE.Vector3(), [])
+  const cameraDirectionRef = useMemo(() => new THREE.Vector3(), [])
+  const ribbonCenterRef = useMemo(() => new THREE.Vector3(), [])
+  const ribbonNextRef = useMemo(() => new THREE.Vector3(), [])
+  const ribbonTangentRef = useMemo(() => new THREE.Vector3(), [])
+  const ribbonSideRef = useMemo(() => new THREE.Vector3(), [])
+  const ribbonSideFallbackRef = useMemo(() => new THREE.Vector3(), [])
+  const ribbonSideBlendedRef = useMemo(() => new THREE.Vector3(), [])
+  const ribbonPrevSideRef = useMemo(() => new THREE.Vector3(), [])
+  const traceStartRef = useMemo(() => new THREE.Vector3(), [])
+  const traceEndRef = useMemo(() => new THREE.Vector3(), [])
+  const traceDirRef = useMemo(() => new THREE.Vector3(), [])
+  const traceCenterRef = useMemo(() => new THREE.Vector3(), [])
+  const traceCoreColorRef = useMemo(() => new THREE.Color(), [])
   const presenceRef = useRef(clamp01(presenceTarget))
+  const traceRandomRef = useRef<(() => number) | null>(null)
+  const traceStateRef = useRef({
+    from: 0,
+    to: 0,
+    previous: -1,
+    progress: 0,
+    speed: 0.9,
+  })
 
   const style = useMemo(() => getHeroStyle(project), [project])
-  const particles = useMemo(() => createParticleField(style, `${project.id}-hero-swarm`), [style, project.id])
+  const flowRibbons = useMemo(() => createFlowRibbonField(style, `${project.id}-hero-ribbons`), [style, project.id])
+  const wireTraceGraph = useMemo(() => createWireTraceGraph(style.shellScale), [style.shellScale])
+  const streamParticles = useMemo(() => createParticleField(style, `${project.id}-hero-stream`, 'stream'), [style, project.id])
+  const dustParticles = useMemo(() => createParticleField(style, `${project.id}-hero-dust`, 'dust'), [style, project.id])
   const accentColor = useMemo(() => new THREE.Color(style.accent), [style.accent])
   const secondaryColor = useMemo(() => new THREE.Color(style.secondary), [style.secondary])
-  const centerOccluderRadius = useMemo(() => {
+  const dustTexture = useMemo(() => createParticleTexture('dust'), [])
+  const silhouetteProfile = useMemo(() => {
+    if (style.kind === 'storm') {
+      return { core: 1.02, shell: 0.76, ringsPrimary: 1.0, ringsSecondary: 0.94, particles: 1.34 }
+    }
+
     if (style.kind === 'harmonic') {
-      return 0.54
+      return { core: 1.04, shell: 0.88, ringsPrimary: 0.88, ringsSecondary: 0.82, particles: 1.08 }
     }
 
-    if (style.kind === 'pulse') {
-      return 0.6
-    }
-
-    return 0.58
+    return { core: 1.0, shell: 0.8, ringsPrimary: 1.08, ringsSecondary: 1.0, particles: 1.22 }
   }, [style.kind])
+
+  useEffect(
+    () => () => {
+      dustTexture.dispose()
+    },
+    [dustTexture],
+  )
 
   const accentBaseOpacity = useMemo(() => {
     if (style.kind === 'harmonic') {
-      return { primary: 0.24, secondary: 0.2 }
+      return { primary: 0.24, secondary: 0.23 }
     }
 
     if (style.kind === 'pulse') {
-      return { primary: 0.22, secondary: 0.18 }
+      return { primary: 0.22, secondary: 0.21 }
     }
 
-    return { primary: 0.22, secondary: 0.18 }
+    return { primary: 0.22, secondary: 0.2 }
   }, [style.kind])
+
+  useEffect(() => {
+    if (dustMeshRef.current) {
+      dustMeshRef.current.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+    }
+  }, [])
+
+  useEffect(
+    () => () => {
+      flowRibbons.geometry.dispose()
+    },
+    [flowRibbons],
+  )
+
+  useEffect(() => {
+    const random = createRandom(getHash(`${project.id}-wire-trace`) + 97)
+    traceRandomRef.current = random
+
+    if (wireTraceGraph.nodes.length < 2) {
+      traceStateRef.current = { from: 0, to: 0, previous: -1, progress: 0, speed: 0.8 }
+      return
+    }
+
+    const from = Math.floor(random() * wireTraceGraph.nodes.length)
+    const to = pickNextTraceNode(wireTraceGraph, from, -1, random)
+    traceStateRef.current = {
+      from,
+      to,
+      previous: -1,
+      progress: 0,
+      speed: style.kind === 'harmonic' ? 0.68 : style.kind === 'pulse' ? 0.76 : 0.72,
+    }
+  }, [project.id, style.kind, wireTraceGraph])
 
   const coreUniforms = useMemo(
     () => ({
@@ -770,16 +1355,26 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
     [secondaryColor],
   )
 
-  const particleUniforms = useMemo(
+  const streamRibbonUniforms = useMemo(
     () => ({
       uTime: { value: 0 },
-      uColor: { value: accentColor.clone().lerp(secondaryColor, 0.14) },
+      uColor: { value: accentColor.clone() },
+      uSecondary: { value: secondaryColor.clone() },
       uOpacity: { value: 0.44 },
-      uBaseSize: { value: style.swarmSize },
-      uPixelRatio: { value: Math.min(gl.getPixelRatio(), 2) },
       uIntensity: { value: 1 },
     }),
-    [accentColor, secondaryColor, gl, style.swarmSize],
+    [accentColor, secondaryColor],
+  )
+
+  const streamSwarmUniforms = useMemo(
+    () => ({
+      uTime: { value: 0 },
+      uColor: { value: accentColor.clone() },
+      uOpacity: { value: 0.28 },
+      uBaseSize: { value: style.kind === 'harmonic' ? 48 : style.kind === 'pulse' ? 50 : 46 },
+      uIntensity: { value: 1 },
+    }),
+    [accentColor, style.kind],
   )
 
   useFrame(({ clock }, delta) => {
@@ -795,16 +1390,28 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       groupRef.current.visible = isVisible
     }
 
-    if (coreMaskRef.current) {
-      coreMaskRef.current.visible = maskVisible
-    }
-
     if (shellMaskRef.current) {
       shellMaskRef.current.visible = maskVisible
     }
 
+    if (shellOcclusionRef.current) {
+      shellOcclusionRef.current.visible = maskVisible
+    }
+
     if (shellAccentMaskRef.current) {
       shellAccentMaskRef.current.visible = maskVisible
+    }
+
+    if (coreMaskRef.current) {
+      coreMaskRef.current.visible = maskVisible
+    }
+
+    if (shellStarBlockerRef.current) {
+      shellStarBlockerRef.current.visible = maskVisible
+    }
+
+    if (coreStarBlockerRef.current) {
+      coreStarBlockerRef.current.visible = maskVisible
     }
 
     if (!isVisible) {
@@ -829,6 +1436,14 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       }
     }
 
+    if (coreRef.current && coreMaskRef.current) {
+      coreMaskRef.current.rotation.copy(coreRef.current.rotation)
+    }
+
+    if (coreRef.current && coreStarBlockerRef.current) {
+      coreStarBlockerRef.current.rotation.copy(coreRef.current.rotation)
+    }
+
     if (shellRef.current) {
       shellRef.current.rotation.y += frameDelta * (reducedMotion ? 0.024 : 0.108)
       shellRef.current.rotation.z += frameDelta * (reducedMotion ? 0.021 : 0.066)
@@ -851,12 +1466,16 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       }
     }
 
-    if (coreRef.current && coreMaskRef.current) {
-      coreMaskRef.current.quaternion.copy(coreRef.current.quaternion)
-    }
-
     if (shellRef.current && shellMaskRef.current) {
       shellMaskRef.current.rotation.copy(shellRef.current.rotation)
+    }
+
+    if (shellRef.current && shellOcclusionRef.current) {
+      shellOcclusionRef.current.rotation.copy(shellRef.current.rotation)
+    }
+
+    if (shellRef.current && shellStarBlockerRef.current) {
+      shellStarBlockerRef.current.rotation.copy(shellRef.current.rotation)
     }
 
     if (shellAccentRef.current && shellAccentMaskRef.current) {
@@ -864,63 +1483,257 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       shellAccentMaskRef.current.scale.copy(shellAccentRef.current.scale)
     }
 
-    updateParticleField(particles, style, elapsed, frameDelta, intensity, collapseParticlesOnFadeOut)
+    if (shellRef.current && shellTraceGroupRef.current) {
+      shellTraceGroupRef.current.rotation.copy(shellRef.current.rotation)
+    }
 
-    if (pointsRef.current) {
-      const attribute = pointsRef.current.geometry.attributes.position as THREE.BufferAttribute
-      attribute.needsUpdate = true
+    if (shellTraceCoreRef.current && shellTraceSegmentRef.current && wireTraceGraph.nodes.length > 1) {
+      const random = traceRandomRef.current ?? createRandom(getHash(`${project.id}-wire-trace-fallback`) + 131)
+      traceRandomRef.current = random
+      const traceState = traceStateRef.current
+      const fromNode = wireTraceGraph.nodes[traceState.from]
+      const toNode = wireTraceGraph.nodes[traceState.to]
+
+      traceStartRef.copy(fromNode)
+      traceEndRef.copy(toNode)
+      traceDirRef.subVectors(traceEndRef, traceStartRef)
+      const edgeLength = Math.max(traceDirRef.length(), 0.0001)
+      traceDirRef.multiplyScalar(1 / edgeLength)
+
+      traceState.progress += ((reducedMotion ? 0.34 : 0.9) * traceState.speed * frameDelta) / edgeLength
+
+      while (traceState.progress >= 1) {
+        traceState.progress -= 1
+        traceState.previous = traceState.from
+        traceState.from = traceState.to
+        traceState.to = pickNextTraceNode(wireTraceGraph, traceState.from, traceState.previous, random)
+
+        traceStartRef.copy(wireTraceGraph.nodes[traceState.from])
+        traceEndRef.copy(wireTraceGraph.nodes[traceState.to])
+        traceDirRef.subVectors(traceEndRef, traceStartRef)
+        const nextLength = Math.max(traceDirRef.length(), 0.0001)
+        traceDirRef.multiplyScalar(1 / nextLength)
+      }
+
+      const currentLength = Math.max(traceStartRef.distanceTo(traceEndRef), 0.0001)
+      const pulseHalfLength = THREE.MathUtils.clamp(currentLength * 0.2, 0.12, 0.36)
+      const pulseDistance = currentLength * traceState.progress
+      const pulseStart = Math.max(0, pulseDistance - pulseHalfLength)
+      const pulseEnd = Math.min(currentLength, pulseDistance + pulseHalfLength)
+      const tracedLength = Math.max(0.001, pulseEnd - pulseStart)
+      traceCenterRef.copy(traceStartRef).addScaledVector(traceDirRef, pulseStart + tracedLength * 0.5)
+      const electricPulse = 0.95 + Math.sin(elapsed * 4.2 + traceState.progress * Math.PI * 6) * 0.11
+
+      shellTraceSegmentRef.current.position.copy(traceCenterRef)
+      shellTraceSegmentRef.current.quaternion.setFromUnitVectors(WORLD_UP, traceDirRef)
+      shellTraceSegmentRef.current.scale.set(electricPulse, tracedLength, electricPulse)
+
+      shellTraceCoreRef.current.position.copy(traceCenterRef)
+      shellTraceCoreRef.current.quaternion.copy(shellTraceSegmentRef.current.quaternion)
+      shellTraceCoreRef.current.scale.set(electricPulse * 0.54, tracedLength, electricPulse * 0.54)
+    }
+
+    updateParticleField(streamParticles, style, elapsed * 0.5, frameDelta, intensity, collapseParticlesOnFadeOut)
+    updateParticleField(dustParticles, style, elapsed, frameDelta, intensity, collapseParticlesOnFadeOut)
+
+    const collapseBlend = collapseParticlesOnFadeOut ? smoothstep(0.02, 0.8, intensity) : 1
+    const cameraDirection = camera.getWorldDirection(cameraDirectionRef).normalize()
+    const cameraUp = cameraUpRef.setFromMatrixColumn(camera.matrixWorld, 1).normalize()
+
+    if (streamRibbonRef.current) {
+      const positionArray = flowRibbons.positionAttribute.array as Float32Array
+      const alongStep = 1 / Math.max(1, flowRibbons.segmentCount - 1)
+      let positionOffset = 0
+
+      for (let ribbon = 0; ribbon < flowRibbons.ribbonCount; ribbon += 1) {
+        const phase = flowRibbons.phases[ribbon]
+        const speed = flowRibbons.speeds[ribbon]
+        const radius = flowRibbons.radii[ribbon]
+        const lift = flowRibbons.lifts[ribbon]
+        const twist = flowRibbons.twists[ribbon]
+        const widthScale = flowRibbons.widths[ribbon]
+        ribbonPrevSideRef.set(0, 0, 0)
+
+        for (let segment = 0; segment < flowRibbons.segmentCount; segment += 1) {
+          const along = segment * alongStep
+          const nextAlong = Math.min(1, along + alongStep)
+
+          sampleRibbonPoint(
+            style,
+            phase,
+            speed,
+            radius,
+            lift,
+            twist,
+            elapsed,
+            along,
+            collapseBlend,
+            ribbonCenterRef,
+          )
+          sampleRibbonPoint(
+            style,
+            phase,
+            speed,
+            radius,
+            lift,
+            twist,
+            elapsed,
+            nextAlong,
+            collapseBlend,
+            ribbonNextRef,
+          )
+
+          ribbonTangentRef.subVectors(ribbonNextRef, ribbonCenterRef)
+          if (ribbonTangentRef.lengthSq() < 0.000001) {
+            ribbonTangentRef.set(0, 1, 0)
+          } else {
+            ribbonTangentRef.normalize()
+          }
+
+          ribbonSideRef.crossVectors(ribbonTangentRef, cameraDirection)
+          const viewAlignedStrength = ribbonSideRef.length()
+          ribbonSideFallbackRef.crossVectors(ribbonTangentRef, cameraUp)
+
+          if (ribbonSideFallbackRef.lengthSq() < 0.000001) {
+            ribbonSideFallbackRef.set(1, 0, 0)
+          } else {
+            ribbonSideFallbackRef.normalize()
+          }
+
+          if (viewAlignedStrength > 0.000001) {
+            ribbonSideRef.normalize()
+            const blend = smoothstep(0.05, 0.24, viewAlignedStrength)
+            ribbonSideBlendedRef
+              .copy(ribbonSideFallbackRef)
+              .multiplyScalar(1 - blend)
+              .addScaledVector(ribbonSideRef, blend)
+              .normalize()
+            ribbonSideRef.copy(ribbonSideBlendedRef)
+          } else {
+            ribbonSideRef.copy(ribbonSideFallbackRef)
+          }
+
+          if (segment > 0 && ribbonPrevSideRef.lengthSq() > 0.000001 && ribbonSideRef.dot(ribbonPrevSideRef) < 0) {
+            ribbonSideRef.multiplyScalar(-1)
+          }
+          ribbonPrevSideRef.copy(ribbonSideRef)
+
+          const head = smoothstep(0.02, 0.3, along)
+          const tail = 1 - smoothstep(0.7, 0.98, along)
+          const profile = smoothstep(0.0, 1.0, head * tail)
+          const pulse = 0.96 + Math.sin(elapsed * 0.18 + phase + along * 4.8) * 0.03
+          const width =
+            (0.035 + widthScale * 0.07) *
+            (0.34 + profile * 0.66) *
+            pulse *
+            (0.2 + intensity * 0.72) *
+            silhouetteProfile.particles
+
+          positionArray[positionOffset] = ribbonCenterRef.x + ribbonSideRef.x * width
+          positionArray[positionOffset + 1] = ribbonCenterRef.y + ribbonSideRef.y * width
+          positionArray[positionOffset + 2] = ribbonCenterRef.z + ribbonSideRef.z * width
+          positionArray[positionOffset + 3] = ribbonCenterRef.x - ribbonSideRef.x * width
+          positionArray[positionOffset + 4] = ribbonCenterRef.y - ribbonSideRef.y * width
+          positionArray[positionOffset + 5] = ribbonCenterRef.z - ribbonSideRef.z * width
+          positionOffset += 6
+        }
+      }
+
+      flowRibbons.positionAttribute.needsUpdate = true
+    }
+
+    if (dustMeshRef.current) {
+      for (let index = 0; index < dustParticles.count; index += 1) {
+        const offset = index * 3
+        const px = dustParticles.positions[offset]
+        const py = dustParticles.positions[offset + 1]
+        const pz = dustParticles.positions[offset + 2]
+        const spin = elapsed * (0.012 + dustParticles.speeds[index] * 0.04) + dustParticles.phases[index]
+        const pulse = 1 + Math.sin(elapsed * 0.24 + dustParticles.phases[index] * 1.2) * 0.1
+        const baseSize = (0.19 + dustParticles.sizes[index] * 0.16) * pulse
+        const width = baseSize * (0.32 + intensity * 0.8) * silhouetteProfile.particles * collapseBlend
+        const height = width * THREE.MathUtils.lerp(0.99, 1.03, dustParticles.flickers[index])
+
+        billboardObjectRef.position.set(px, py, pz)
+        billboardObjectRef.quaternion.copy(camera.quaternion)
+        billboardObjectRef.rotateZ(spin * 0.2)
+        billboardObjectRef.scale.set(width, height, 1)
+        billboardObjectRef.updateMatrix()
+        dustMeshRef.current.setMatrixAt(index, billboardObjectRef.matrix)
+      }
+
+      dustMeshRef.current.instanceMatrix.needsUpdate = true
+    }
+
+    if (streamPointsRef.current) {
+      const streamPosition = streamPointsRef.current.geometry.attributes.position as THREE.BufferAttribute
+      streamPosition.needsUpdate = true
     }
 
     if (coreMaterialRef.current) {
       coreMaterialRef.current.uniforms.uTime.value = elapsed
       coreMaterialRef.current.uniforms.uColor.value.copy(accentColor)
       if (style.kind === 'pulse') {
-        coreMaterialRef.current.uniforms.uIntensity.value = (0.17 + intensity * 0.38) * intensity
-        coreMaterialRef.current.uniforms.uEnergy.value = (0.18 + intensity * 0.54) * intensity
+        coreMaterialRef.current.uniforms.uIntensity.value = (0.17 + intensity * 0.38) * intensity * silhouetteProfile.core
+        coreMaterialRef.current.uniforms.uEnergy.value = (0.18 + intensity * 0.54) * intensity * silhouetteProfile.core
       } else {
-        coreMaterialRef.current.uniforms.uIntensity.value = (0.22 + intensity * 0.48) * intensity
-        coreMaterialRef.current.uniforms.uEnergy.value = (0.2 + intensity * 0.7) * intensity
+        coreMaterialRef.current.uniforms.uIntensity.value = (0.22 + intensity * 0.48) * intensity * silhouetteProfile.core
+        coreMaterialRef.current.uniforms.uEnergy.value = (0.2 + intensity * 0.7) * intensity * silhouetteProfile.core
       }
     }
 
     if (shellMaterialRef.current) {
       shellMaterialRef.current.uniforms.uTime.value = elapsed
       shellMaterialRef.current.uniforms.uColor.value.copy(secondaryColor).lerp(accentColor, 0.18)
-      shellMaterialRef.current.uniforms.uIntensity.value = (0.26 + intensity * 0.62) * intensity
+      shellMaterialRef.current.uniforms.uIntensity.value = (0.26 + intensity * 0.62) * intensity * silhouetteProfile.shell
     }
 
-    if (particleMaterialRef.current) {
-      particleMaterialRef.current.uniforms.uTime.value = elapsed
-      particleMaterialRef.current.uniforms.uColor.value.copy(accentColor).lerp(secondaryColor, 0.12)
-      particleMaterialRef.current.uniforms.uIntensity.value = (0.22 + intensity * 0.74) * intensity
-      particleMaterialRef.current.uniforms.uOpacity.value = (0.16 + intensity * 0.28) * intensity
-      particleMaterialRef.current.uniforms.uPixelRatio.value = Math.min(gl.getPixelRatio(), 2)
+    if (streamRibbonMaterialRef.current) {
+      streamRibbonMaterialRef.current.uniforms.uTime.value = elapsed
+      streamRibbonMaterialRef.current.uniforms.uColor.value.copy(accentColor)
+      streamRibbonMaterialRef.current.uniforms.uSecondary.value.copy(secondaryColor).lerp(accentColor, 0.2)
+      streamRibbonMaterialRef.current.uniforms.uIntensity.value = intensity * silhouetteProfile.particles
+      streamRibbonMaterialRef.current.uniforms.uOpacity.value = (0.07 + intensity * 0.18) * intensity
+    }
+
+    if (streamSwarmMaterialRef.current) {
+      streamSwarmMaterialRef.current.uniforms.uTime.value = elapsed
+      streamSwarmMaterialRef.current.uniforms.uColor.value.copy(accentColor).lerp(secondaryColor, 0.06)
+      streamSwarmMaterialRef.current.uniforms.uIntensity.value = intensity * silhouetteProfile.particles
+      streamSwarmMaterialRef.current.uniforms.uOpacity.value =
+        (0.12 + intensity * 0.36) * intensity * silhouetteProfile.particles
+    }
+
+    if (traceSegmentMaterialRef.current) {
+      traceSegmentMaterialRef.current.color.copy(accentColor).lerp(secondaryColor, 0.08)
+      traceSegmentMaterialRef.current.opacity = (0.2 + intensity * 0.6) * intensity
+    }
+
+    if (traceCoreMaterialRef.current) {
+      traceCoreMaterialRef.current.color.copy(traceCoreColorRef.copy(accentColor).lerp(WHITE, 0.4))
+      traceCoreMaterialRef.current.opacity = (0.26 + intensity * 0.72) * intensity
+    }
+
+    if (dustMaterialRef.current) {
+      dustMaterialRef.current.color.copy(secondaryColor).lerp(accentColor, 0.26)
+      dustMaterialRef.current.opacity = (0.11 + intensity * 0.4) * intensity * silhouetteProfile.particles * 0.86
     }
 
     if (accentPrimaryMaterialRef.current) {
-      accentPrimaryMaterialRef.current.opacity = accentBaseOpacity.primary * intensity
+      accentPrimaryMaterialRef.current.opacity = accentBaseOpacity.primary * silhouetteProfile.ringsPrimary * intensity
     }
 
     if (accentSecondaryMaterialRef.current) {
-      accentSecondaryMaterialRef.current.opacity = accentBaseOpacity.secondary * intensity
+      accentSecondaryMaterialRef.current.opacity = accentBaseOpacity.secondary * silhouetteProfile.ringsSecondary * intensity
     }
-  })
+  }, -2)
 
   return (
     <group ref={groupRef} position={project.coordinates}>
-      <mesh renderOrder={-42}>
-        <sphereGeometry args={[centerOccluderRadius, 24, 24]} />
-        <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
-      </mesh>
-
-      <mesh ref={coreMaskRef} renderOrder={-40}>
-        <HeroCoreGeometry kind={style.kind} />
-        <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
-      </mesh>
-
       <mesh
-        ref={shellMaskRef}
-        renderOrder={-40}
+        ref={shellOcclusionRef}
+        renderOrder={-41}
+        frustumCulled={false}
         rotation={
           style.kind === 'pulse'
             ? [Math.PI / 4, Math.PI / 3, 0]
@@ -928,18 +1741,80 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
         }
       >
         <icosahedronGeometry args={[style.shellScale, 1]} />
-        <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
+        <meshBasicMaterial
+          colorWrite={false}
+          depthWrite={false}
+          depthTest={false}
+          side={THREE.DoubleSide}
+          stencilWrite
+          stencilRef={1}
+          stencilFunc={THREE.AlwaysStencilFunc}
+          stencilFail={THREE.KeepStencilOp}
+          stencilZFail={THREE.KeepStencilOp}
+          stencilZPass={THREE.ReplaceStencilOp}
+          toneMapped={false}
+        />
+      </mesh>
+
+      <mesh
+        ref={shellMaskRef}
+        renderOrder={-40}
+        frustumCulled={false}
+        rotation={
+          style.kind === 'pulse'
+            ? [Math.PI / 4, Math.PI / 3, 0]
+            : [0, 0, 0]
+        }
+      >
+        <icosahedronGeometry args={[style.shellScale, 1]} />
+        <meshBasicMaterial
+          colorWrite={false}
+          depthWrite={false}
+          depthTest={false}
+          side={THREE.DoubleSide}
+          stencilWrite
+          stencilRef={1}
+          stencilFunc={THREE.AlwaysStencilFunc}
+          stencilFail={THREE.KeepStencilOp}
+          stencilZFail={THREE.KeepStencilOp}
+          stencilZPass={THREE.ReplaceStencilOp}
+          toneMapped={false}
+        />
       </mesh>
 
       {style.kind === 'storm' && (
         <group ref={shellAccentMaskRef} renderOrder={-40}>
           <mesh rotation={[Math.PI / 2, 0, 0]}>
-            <torusGeometry args={[1.65, 0.03, 16, 120]} />
-            <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
+            <torusGeometry args={[1.65, 0.018, 16, 120]} />
+            <meshBasicMaterial
+              colorWrite={false}
+              depthWrite={false}
+              depthTest={false}
+              side={THREE.DoubleSide}
+              stencilWrite
+              stencilRef={1}
+              stencilFunc={THREE.AlwaysStencilFunc}
+              stencilFail={THREE.KeepStencilOp}
+              stencilZFail={THREE.KeepStencilOp}
+              stencilZPass={THREE.ReplaceStencilOp}
+              toneMapped={false}
+            />
           </mesh>
           <mesh rotation={[Math.PI / 2, Math.PI / 5, 0]}>
-            <torusGeometry args={[1.37, 0.024, 16, 120]} />
-            <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
+            <torusGeometry args={[1.37, 0.015, 16, 120]} />
+            <meshBasicMaterial
+              colorWrite={false}
+              depthWrite={false}
+              depthTest={false}
+              side={THREE.DoubleSide}
+              stencilWrite
+              stencilRef={1}
+              stencilFunc={THREE.AlwaysStencilFunc}
+              stencilFail={THREE.KeepStencilOp}
+              stencilZFail={THREE.KeepStencilOp}
+              stencilZPass={THREE.ReplaceStencilOp}
+              toneMapped={false}
+            />
           </mesh>
         </group>
       )}
@@ -947,12 +1822,36 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       {style.kind === 'harmonic' && (
         <group ref={shellAccentMaskRef} renderOrder={-40}>
           <mesh rotation={[Math.PI / 2, 0.06, 0]}>
-            <torusGeometry args={[1.65, 0.026, 12, 120]} />
-            <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
+            <torusGeometry args={[1.65, 0.018, 12, 120]} />
+            <meshBasicMaterial
+              colorWrite={false}
+              depthWrite={false}
+              depthTest={false}
+              side={THREE.DoubleSide}
+              stencilWrite
+              stencilRef={1}
+              stencilFunc={THREE.AlwaysStencilFunc}
+              stencilFail={THREE.KeepStencilOp}
+              stencilZFail={THREE.KeepStencilOp}
+              stencilZPass={THREE.ReplaceStencilOp}
+              toneMapped={false}
+            />
           </mesh>
           <mesh rotation={[Math.PI / 2, Math.PI / 5, 0]}>
-            <torusGeometry args={[1.37, 0.022, 12, 120]} />
-            <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
+            <torusGeometry args={[1.37, 0.015, 12, 120]} />
+            <meshBasicMaterial
+              colorWrite={false}
+              depthWrite={false}
+              depthTest={false}
+              side={THREE.DoubleSide}
+              stencilWrite
+              stencilRef={1}
+              stencilFunc={THREE.AlwaysStencilFunc}
+              stencilFail={THREE.KeepStencilOp}
+              stencilZFail={THREE.KeepStencilOp}
+              stencilZPass={THREE.ReplaceStencilOp}
+              toneMapped={false}
+            />
           </mesh>
         </group>
       )}
@@ -960,15 +1859,89 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       {style.kind === 'pulse' && (
         <group ref={shellAccentMaskRef} renderOrder={-40}>
           <mesh rotation={[Math.PI / 2, 0, 0]}>
-            <torusGeometry args={[1.37, 0.024, 10, 90]} />
-            <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
+            <torusGeometry args={[1.37, 0.018, 10, 90]} />
+            <meshBasicMaterial
+              colorWrite={false}
+              depthWrite={false}
+              depthTest={false}
+              side={THREE.DoubleSide}
+              stencilWrite
+              stencilRef={1}
+              stencilFunc={THREE.AlwaysStencilFunc}
+              stencilFail={THREE.KeepStencilOp}
+              stencilZFail={THREE.KeepStencilOp}
+              stencilZPass={THREE.ReplaceStencilOp}
+              toneMapped={false}
+            />
           </mesh>
           <mesh rotation={[Math.PI / 2, Math.PI / 5, 0]}>
-            <torusGeometry args={[1.65, 0.02, 10, 90]} />
-            <meshBasicMaterial colorWrite={false} depthWrite depthTest side={THREE.DoubleSide} toneMapped={false} />
+            <torusGeometry args={[1.65, 0.014, 10, 90]} />
+            <meshBasicMaterial
+              colorWrite={false}
+              depthWrite={false}
+              depthTest={false}
+              side={THREE.DoubleSide}
+              stencilWrite
+              stencilRef={1}
+              stencilFunc={THREE.AlwaysStencilFunc}
+              stencilFail={THREE.KeepStencilOp}
+              stencilZFail={THREE.KeepStencilOp}
+              stencilZPass={THREE.ReplaceStencilOp}
+              toneMapped={false}
+            />
           </mesh>
         </group>
       )}
+
+      <mesh ref={coreMaskRef} renderOrder={-39} frustumCulled={false}>
+        <HeroCoreGeometry kind={style.kind} />
+        <meshBasicMaterial
+          colorWrite={false}
+          depthWrite={false}
+          depthTest={false}
+          side={THREE.DoubleSide}
+          stencilWrite
+          stencilRef={1}
+          stencilFunc={THREE.AlwaysStencilFunc}
+          stencilFail={THREE.KeepStencilOp}
+          stencilZFail={THREE.KeepStencilOp}
+          stencilZPass={THREE.ReplaceStencilOp}
+          toneMapped={false}
+        />
+      </mesh>
+
+      <mesh
+        ref={shellStarBlockerRef}
+        renderOrder={-28}
+        frustumCulled={false}
+        rotation={
+          style.kind === 'pulse'
+            ? [Math.PI / 4, Math.PI / 3, 0]
+            : [0, 0, 0]
+        }
+      >
+        <icosahedronGeometry args={[style.shellScale * 1.02, 1]} />
+        <meshBasicMaterial
+          color="#020407"
+          transparent
+          opacity={0.96}
+          depthWrite={false}
+          depthTest={false}
+          toneMapped={false}
+        />
+      </mesh>
+
+      <mesh ref={coreStarBlockerRef} renderOrder={-27} frustumCulled={false}>
+        <HeroCoreGeometry kind={style.kind} />
+        <meshBasicMaterial
+          color="#020407"
+          transparent
+          opacity={0.94}
+          depthWrite={false}
+          depthTest={false}
+          toneMapped={false}
+        />
+      </mesh>
 
       <mesh ref={coreRef}>
         <HeroCoreGeometry kind={style.kind} />
@@ -978,9 +1951,9 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
           vertexShader={CORE_VERTEX_SHADER}
           fragmentShader={CORE_FRAGMENT_SHADER}
           transparent
-          depthTest={false}
-          depthWrite={false}
-          blending={THREE.AdditiveBlending}
+          depthTest
+          depthWrite
+          blending={THREE.NormalBlending}
           toneMapped={false}
         />
       </mesh>
@@ -1007,6 +1980,36 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
           toneMapped={false}
         />
       </mesh>
+
+      <group ref={shellTraceGroupRef} visible={false}>
+        <mesh ref={shellTraceSegmentRef} renderOrder={1}>
+          <cylinderGeometry args={[0.028, 0.028, 1, 12, 1, true]} />
+          <meshBasicMaterial
+            ref={traceSegmentMaterialRef}
+            color={style.accent}
+            transparent
+            opacity={0.46}
+            depthWrite={false}
+            depthTest={false}
+            blending={THREE.AdditiveBlending}
+            toneMapped={false}
+          />
+        </mesh>
+
+        <mesh ref={shellTraceCoreRef} renderOrder={2}>
+          <cylinderGeometry args={[0.013, 0.013, 1, 12, 1, true]} />
+          <meshBasicMaterial
+            ref={traceCoreMaterialRef}
+            color={WHITE}
+            transparent
+            opacity={0.66}
+            depthWrite={false}
+            depthTest={false}
+            blending={THREE.AdditiveBlending}
+            toneMapped={false}
+          />
+        </mesh>
+      </group>
 
       {style.kind === 'storm' && (
         <group ref={shellAccentRef}>
@@ -1095,20 +2098,77 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
         </group>
       )}
 
-      <points ref={pointsRef}>
-        <bufferGeometry>
-          <bufferAttribute attach="attributes-position" args={[particles.positions, 3]} />
-          <bufferAttribute attach="attributes-aSize" args={[particles.sizes, 1]} />
-          <bufferAttribute attach="attributes-aFlicker" args={[particles.flickers, 1]} />
-        </bufferGeometry>
+      <instancedMesh
+        ref={dustMeshRef}
+        args={[undefined, undefined, dustParticles.count]}
+        renderOrder={-10}
+        frustumCulled={false}
+        visible={false}
+      >
+        <planeGeometry args={[1, 1]} />
+        <meshBasicMaterial
+          ref={dustMaterialRef}
+          map={dustTexture}
+          color={style.secondary}
+          transparent
+          opacity={0.2}
+          alphaTest={0.002}
+          depthTest
+          depthWrite={false}
+          stencilWrite
+          stencilRef={1}
+          stencilFunc={THREE.NotEqualStencilFunc}
+          stencilFail={THREE.KeepStencilOp}
+          stencilZFail={THREE.KeepStencilOp}
+          stencilZPass={THREE.KeepStencilOp}
+          blending={THREE.NormalBlending}
+          side={THREE.DoubleSide}
+          toneMapped={false}
+        />
+      </instancedMesh>
+
+      <mesh ref={streamRibbonRef} geometry={flowRibbons.geometry} renderOrder={-9} frustumCulled={false}>
         <shaderMaterial
-          ref={particleMaterialRef}
-          uniforms={particleUniforms}
-          vertexShader={PARTICLE_VERTEX_SHADER}
-          fragmentShader={PARTICLE_FRAGMENT_SHADER}
+          ref={streamRibbonMaterialRef}
+          uniforms={streamRibbonUniforms}
+          vertexShader={LIQUID_RIBBON_VERTEX_SHADER}
+          fragmentShader={LIQUID_RIBBON_FRAGMENT_SHADER}
           transparent
           depthTest
           depthWrite={false}
+          stencilWrite
+          stencilRef={1}
+          stencilFunc={THREE.NotEqualStencilFunc}
+          stencilFail={THREE.KeepStencilOp}
+          stencilZFail={THREE.KeepStencilOp}
+          stencilZPass={THREE.KeepStencilOp}
+          blending={THREE.NormalBlending}
+          side={THREE.DoubleSide}
+          forceSinglePass
+          toneMapped={false}
+        />
+      </mesh>
+
+      <points ref={streamPointsRef} renderOrder={-8} frustumCulled={false}>
+        <bufferGeometry>
+          <bufferAttribute attach="attributes-position" args={[streamParticles.positions, 3]} />
+          <bufferAttribute attach="attributes-aSize" args={[streamParticles.sizes, 1]} />
+          <bufferAttribute attach="attributes-aFlicker" args={[streamParticles.flickers, 1]} />
+        </bufferGeometry>
+        <shaderMaterial
+          ref={streamSwarmMaterialRef}
+          uniforms={streamSwarmUniforms}
+          vertexShader={STREAM_SWARM_VERTEX_SHADER}
+          fragmentShader={STREAM_SWARM_FRAGMENT_SHADER}
+          transparent
+          depthTest
+          depthWrite={false}
+          stencilWrite
+          stencilRef={1}
+          stencilFunc={THREE.NotEqualStencilFunc}
+          stencilFail={THREE.KeepStencilOp}
+          stencilZFail={THREE.KeepStencilOp}
+          stencilZPass={THREE.KeepStencilOp}
           blending={THREE.AdditiveBlending}
           toneMapped={false}
         />
@@ -1121,56 +2181,121 @@ function CinematicBloom({ project, reducedMotion }: CinematicBloomProps) {
   const { gl, scene, camera, size } = useThree()
   const composerRef = useRef<EffectComposer | null>(null)
   const bloomRef = useRef<UnrealBloomPass | null>(null)
+  const rgbShiftRef = useRef<ShaderPass | null>(null)
+  const vignetteRef = useRef<ShaderPass | null>(null)
+  const filmRef = useRef<FilmPass | null>(null)
 
   useEffect(() => {
     const renderPass = new RenderPass(scene, camera)
-    const bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.9, 0.6, 0.36)
-    const composer = new EffectComposer(gl)
+    const bloomPass = new UnrealBloomPass(new THREE.Vector2(size.width, size.height), 0.66, 0.5, 0.41)
+    const rgbShiftPass = new ShaderPass(RGBShiftShader)
+    const vignettePass = new ShaderPass(VignetteShader)
+    const filmPass = new FilmPass(0.008, 0, 0, false)
+    const composerTarget = new THREE.WebGLRenderTarget(size.width, size.height, {
+      depthBuffer: true,
+      stencilBuffer: true,
+    })
+    if ('samples' in composerTarget) {
+      composerTarget.samples = Math.min(4, gl.capabilities.maxSamples)
+    }
 
+    const rgbUniforms = rgbShiftPass.uniforms as Record<string, THREE.IUniform<number>>
+    rgbUniforms.amount.value = 0.00012
+    rgbUniforms.angle.value = 0.22
+
+    const vignetteUniforms = vignettePass.uniforms as Record<string, THREE.IUniform<number>>
+    vignetteUniforms.offset.value = 1.04
+    vignetteUniforms.darkness.value = 1.08
+
+    const filmUniforms = filmPass.uniforms as Record<string, THREE.IUniform<number>>
+    filmUniforms.nIntensity.value = 0.004
+    filmUniforms.sIntensity.value = 0
+    filmUniforms.sCount.value = 0
+
+    const composer = new EffectComposer(gl, composerTarget)
     composer.addPass(renderPass)
     composer.addPass(bloomPass)
+    composer.addPass(rgbShiftPass)
+    composer.addPass(vignettePass)
+    composer.addPass(filmPass)
 
     composerRef.current = composer
     bloomRef.current = bloomPass
+    rgbShiftRef.current = rgbShiftPass
+    vignetteRef.current = vignettePass
+    filmRef.current = filmPass
 
     return () => {
       composer.dispose()
+      composerTarget.dispose()
       composerRef.current = null
       bloomRef.current = null
+      rgbShiftRef.current = null
+      vignetteRef.current = null
+      filmRef.current = null
     }
-  }, [gl, scene, camera])
-
-  useEffect(() => {
-    composerRef.current?.setSize(size.width, size.height)
-  }, [size.width, size.height])
+  }, [camera, gl, scene, size.height, size.width])
 
   useEffect(() => {
     const bloomPass = bloomRef.current
+    const rgbShiftPass = rgbShiftRef.current
+    const vignettePass = vignetteRef.current
+    const filmPass = filmRef.current
 
-    if (!bloomPass) {
+    if (!bloomPass || !rgbShiftPass || !vignettePass || !filmPass) {
       return
     }
 
+    const rgbUniforms = rgbShiftPass.uniforms as Record<string, THREE.IUniform<number>>
+    const vignetteUniforms = vignettePass.uniforms as Record<string, THREE.IUniform<number>>
+    const filmUniforms = filmPass.uniforms as Record<string, THREE.IUniform<number>>
+
     if (!project) {
-      bloomPass.strength = reducedMotion ? 0.42 : 0.5
-      bloomPass.radius = 0.55
-      bloomPass.threshold = 0.44
+      bloomPass.strength = reducedMotion ? 0.4 : 0.48
+      bloomPass.radius = 0.46
+      bloomPass.threshold = 0.5
+      rgbUniforms.amount.value = 0.00008
+      vignetteUniforms.darkness.value = 1.06
+      filmUniforms.nIntensity.value = reducedMotion ? 0.001 : 0.003
     } else if (project.id === 'gpgpu-particles') {
-      bloomPass.strength = reducedMotion ? 0.62 : 0.8
-      bloomPass.radius = 0.62
-      bloomPass.threshold = 0.34
+      bloomPass.strength = reducedMotion ? 0.54 : 0.68
+      bloomPass.radius = 0.56
+      bloomPass.threshold = 0.39
+      rgbUniforms.amount.value = 0.00014
+      vignetteUniforms.darkness.value = 1.04
+      filmUniforms.nIntensity.value = reducedMotion ? 0.0015 : 0.0038
     } else if (project.id === 'voyce') {
-      bloomPass.strength = reducedMotion ? 0.52 : 0.68
-      bloomPass.radius = 0.58
-      bloomPass.threshold = 0.38
+      bloomPass.strength = reducedMotion ? 0.48 : 0.6
+      bloomPass.radius = 0.52
+      bloomPass.threshold = 0.41
+      rgbUniforms.amount.value = 0.00012
+      vignetteUniforms.darkness.value = 1.04
+      filmUniforms.nIntensity.value = reducedMotion ? 0.0014 : 0.0034
     } else {
-      bloomPass.strength = reducedMotion ? 0.58 : 0.74
-      bloomPass.radius = 0.6
-      bloomPass.threshold = 0.35
+      bloomPass.strength = reducedMotion ? 0.52 : 0.64
+      bloomPass.radius = 0.54
+      bloomPass.threshold = 0.4
+      rgbUniforms.amount.value = 0.00013
+      vignetteUniforms.darkness.value = 1.05
+      filmUniforms.nIntensity.value = reducedMotion ? 0.0015 : 0.0036
     }
   }, [project, reducedMotion])
 
-  useFrame((_state, delta) => {
+  useFrame(({ clock }, delta) => {
+    const elapsed = clock.getElapsedTime()
+    const rgbShiftPass = rgbShiftRef.current
+    const vignettePass = vignetteRef.current
+
+    if (rgbShiftPass) {
+      const rgbUniforms = rgbShiftPass.uniforms as Record<string, THREE.IUniform<number>>
+      rgbUniforms.angle.value = 0.2 + Math.sin(elapsed * 0.09) * 0.03
+    }
+
+    if (vignettePass) {
+      const vignetteUniforms = vignettePass.uniforms as Record<string, THREE.IUniform<number>>
+      vignetteUniforms.offset.value = 1.03 + Math.sin(elapsed * 0.06) * 0.015
+    }
+
     composerRef.current?.render(delta)
   }, 1)
 
@@ -1210,6 +2335,10 @@ function CameraRig({
   const isTransitioningRef = useRef(true)
   const isInitialNeutralTransitionRef = useRef(false)
   const hasInitializedRef = useRef(false)
+  const transitionModeRef = useRef<'neutral-intro' | 'neutral-to-focus' | 'focus-to-neutral' | 'focus-to-focus'>(
+    'focus-to-focus',
+  )
+  const previousActiveProjectIdRef = useRef<string | null>(activeProject?.id ?? null)
   const isUserInteractingRef = useRef(false)
   const halfwayNotifiedRef = useRef(false)
   const wasDampingEnabledRef = useRef(true)
@@ -1393,6 +2522,9 @@ function CameraRig({
 
     const shouldUseInitialNeutralTransition = !hasInitializedRef.current && isNeutral && !reducedMotion
 
+    const nextActiveProjectId = activeProject?.id ?? null
+    const previousActiveProjectId = previousActiveProjectIdRef.current
+
     if (shouldUseInitialNeutralTransition) {
       const finalViewDirection = cameraPosition.clone().sub(target).normalize()
       const introSide = new THREE.Vector3().crossVectors(finalViewDirection, WORLD_UP)
@@ -1420,16 +2552,26 @@ function CameraRig({
         .addScaledVector(WORLD_UP, introLift * 0.44)
 
       isInitialNeutralTransitionRef.current = true
+      transitionModeRef.current = 'neutral-intro'
     } else {
       startTargetRef.current.copy(controls?.target ?? active)
       startCameraRef.current.copy(camera.position)
       isInitialNeutralTransitionRef.current = false
+
+      if (previousActiveProjectId === null && nextActiveProjectId !== null) {
+        transitionModeRef.current = 'neutral-to-focus'
+      } else if (previousActiveProjectId !== null && nextActiveProjectId === null) {
+        transitionModeRef.current = 'focus-to-neutral'
+      } else {
+        transitionModeRef.current = 'focus-to-focus'
+      }
     }
 
     endTargetRef.current.copy(target)
     endCameraRef.current.copy(cameraPosition)
     activeAnchorRef.current.copy(active)
     hasInitializedRef.current = true
+    previousActiveProjectIdRef.current = nextActiveProjectId
 
     const startOffset = startCameraRef.current.clone().sub(startTargetRef.current)
     const endOffset = endCameraRef.current.clone().sub(endTargetRef.current)
@@ -1500,12 +2642,21 @@ function CameraRig({
     controls.enableDamping = false
 
     const frameDelta = reducedMotion ? delta : Math.min(delta, 1 / 30)
+    const transitionMode = transitionModeRef.current
     const duration = reducedMotion
       ? 0.01
-      : isInitialNeutralTransitionRef.current
+      : transitionMode === 'neutral-intro'
         ? size.width < 900
           ? 2.0
           : 2.25
+        : transitionMode === 'neutral-to-focus'
+          ? size.width < 900
+            ? 1.62
+            : 1.92
+          : transitionMode === 'focus-to-neutral'
+            ? size.width < 900
+              ? 1.52
+              : 1.84
         : size.width < 900
           ? 1.75
           : 2.35
@@ -1518,13 +2669,20 @@ function CameraRig({
       onTransitionHalfway?.()
     }
 
-    const eased = isInitialNeutralTransitionRef.current
-      ? smoothstep(0, 1, nextProgress)
-      : easeInOutCubic(nextProgress)
+    const eased =
+      transitionMode === 'neutral-intro'
+        ? smoothstep(0, 1, nextProgress)
+        : transitionMode === 'focus-to-focus'
+          ? easeInOutCubic(nextProgress)
+          : easeInOutSine(nextProgress)
     const arcLift = reducedMotion
       ? 0
-      : isInitialNeutralTransitionRef.current
+      : transitionMode === 'neutral-intro'
         ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.04 : 0.08)
+        : transitionMode === 'neutral-to-focus'
+          ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.1 : 0.22)
+          : transitionMode === 'focus-to-neutral'
+            ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.06 : 0.15)
         : Math.sin(Math.PI * eased) * (size.width < 900 ? 0.08 : 0.24)
 
     transitionTargetRef.current.lerpVectors(startTargetRef.current, endTargetRef.current, eased)
@@ -1557,12 +2715,16 @@ function CameraRig({
     const radius = THREE.MathUtils.lerp(startOffsetRadiusRef.current, endOffsetRadiusRef.current, eased)
     const cinematicDolly = reducedMotion
       ? 0
-      : isInitialNeutralTransitionRef.current
+      : transitionMode === 'neutral-intro'
         ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.08 : 0.14)
+        : transitionMode === 'neutral-to-focus'
+          ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.52 : 1.08)
+          : transitionMode === 'focus-to-neutral'
+            ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.28 : 0.64)
         : Math.sin(Math.PI * eased) * (size.width < 900 ? 0.44 : 0.94)
 
     camera.position.copy(transitionTargetRef.current).addScaledVector(transitionDirectionRef.current, radius + cinematicDolly)
-    if (isInitialNeutralTransitionRef.current) {
+    if (transitionMode === 'neutral-intro') {
       const introSway = Math.sin(Math.PI * eased) * (size.width < 900 ? 0.035 : 0.055)
       camera.position.addScaledVector(introSwayAxisRef.current, introSway)
     }
@@ -1579,7 +2741,7 @@ function CameraRig({
       isTransitioningRef.current = false
       onTransitionProgress?.(1)
       orbitResumeRef.current = 0
-      arrivalHoldRef.current = reducedMotion ? 0 : isInitialNeutralTransitionRef.current ? 0.08 : 0.22
+      arrivalHoldRef.current = reducedMotion ? 0 : transitionMode === 'neutral-intro' ? 0.08 : 0.22
       isInitialNeutralTransitionRef.current = false
       controls.enabled = true
       controls.enableDamping = wasDampingEnabledRef.current
@@ -1699,17 +2861,45 @@ function CinematicLights({ project, reducedMotion }: { project: Project | null; 
 
 function NeutralStarField({ reducedMotion }: { reducedMotion: boolean }) {
   const baseGroupRef = useRef<THREE.Group>(null)
+  const midGroupRef = useRef<THREE.Group>(null)
   const overlayGroupRef = useRef<THREE.Group>(null)
   const baseMeshRef = useRef<THREE.InstancedMesh>(null)
+  const midMeshRef = useRef<THREE.InstancedMesh>(null)
   const overlayMeshRef = useRef<THREE.InstancedMesh>(null)
+  const nebulaNearRef = useRef<THREE.Mesh>(null)
+  const nebulaFarRef = useRef<THREE.Mesh>(null)
+  const nebulaNearMaterialRef = useRef<THREE.ShaderMaterial>(null)
+  const nebulaFarMaterialRef = useRef<THREE.ShaderMaterial>(null)
   const scratchObject = useMemo(() => new THREE.Object3D(), [])
 
   const neutralBaseStars = useMemo(
-    () => createNeutralStarInstances('neutral-stars-base', 1842, 122, 28, [0.036, 0.084]),
+    () => createNeutralStarInstances('neutral-stars-base', 1842, 122, 28, [0.026, 0.062]),
+    [],
+  )
+  const neutralMidStars = useMemo(
+    () => createNeutralStarInstances('neutral-stars-mid', 1120, 108, 22, [0.022, 0.052]),
     [],
   )
   const neutralOverlayStars = useMemo(
-    () => createNeutralStarInstances('neutral-stars-overlay', 744, 94, 18, [0.058, 0.125]),
+    () => createNeutralStarInstances('neutral-stars-overlay', 744, 94, 18, [0.038, 0.085]),
+    [],
+  )
+  const nebulaNearUniforms = useMemo(
+    () => ({
+      uTime: { value: 0 },
+      uColor: { value: new THREE.Color('#294a64') },
+      uOpacity: { value: 0.08 },
+      uScale: { value: 3.5 },
+    }),
+    [],
+  )
+  const nebulaFarUniforms = useMemo(
+    () => ({
+      uTime: { value: 0 },
+      uColor: { value: new THREE.Color('#3a4d73') },
+      uOpacity: { value: 0.06 },
+      uScale: { value: 2.9 },
+    }),
     [],
   )
 
@@ -1734,8 +2924,9 @@ function NeutralStarField({ reducedMotion }: { reducedMotion: boolean }) {
 
   useLayoutEffect(() => {
     applyInstances(baseMeshRef.current, neutralBaseStars)
+    applyInstances(midMeshRef.current, neutralMidStars)
     applyInstances(overlayMeshRef.current, neutralOverlayStars)
-  }, [applyInstances, neutralBaseStars, neutralOverlayStars])
+  }, [applyInstances, neutralBaseStars, neutralMidStars, neutralOverlayStars])
 
   useFrame(({ clock }) => {
     const elapsed = clock.getElapsedTime()
@@ -1745,22 +2936,74 @@ function NeutralStarField({ reducedMotion }: { reducedMotion: boolean }) {
       baseGroupRef.current.rotation.x = reducedMotion ? 0 : Math.sin(elapsed * 0.03) * 0.012
     }
 
+    if (midGroupRef.current) {
+      midGroupRef.current.rotation.y = reducedMotion ? 0 : -elapsed * 0.0054 + 0.22
+      midGroupRef.current.rotation.x = reducedMotion ? 0 : Math.sin(elapsed * 0.022) * 0.014
+    }
+
     if (overlayGroupRef.current) {
       overlayGroupRef.current.rotation.y = reducedMotion ? 0 : -elapsed * 0.0048 + 0.4
       overlayGroupRef.current.rotation.x = reducedMotion ? 0 : Math.cos(elapsed * 0.028) * 0.01
+    }
+
+    if (nebulaNearRef.current) {
+      nebulaNearRef.current.rotation.z = reducedMotion ? -0.34 : -0.34 + Math.sin(elapsed * 0.045) * 0.04
+      nebulaNearRef.current.rotation.y = reducedMotion ? 0.22 : 0.22 + Math.cos(elapsed * 0.032) * 0.05
+    }
+
+    if (nebulaFarRef.current) {
+      nebulaFarRef.current.rotation.z = reducedMotion ? 0.2 : 0.2 + Math.sin(elapsed * 0.034) * 0.035
+      nebulaFarRef.current.rotation.y = reducedMotion ? -0.18 : -0.18 + Math.cos(elapsed * 0.028) * 0.038
+    }
+
+    if (nebulaNearMaterialRef.current) {
+      nebulaNearMaterialRef.current.uniforms.uTime.value = elapsed
+      nebulaNearMaterialRef.current.uniforms.uOpacity.value = 0.07 + Math.sin(elapsed * 0.14) * 0.008
+    }
+
+    if (nebulaFarMaterialRef.current) {
+      nebulaFarMaterialRef.current.uniforms.uTime.value = elapsed + 11
+      nebulaFarMaterialRef.current.uniforms.uOpacity.value = 0.055 + Math.cos(elapsed * 0.11) * 0.007
     }
   })
 
   return (
     <>
-      <group ref={baseGroupRef} renderOrder={-30} frustumCulled={false}>
-        <instancedMesh ref={baseMeshRef} args={[undefined, undefined, neutralBaseStars.count]} frustumCulled={false}>
-          <sphereGeometry args={[2, 6, 6]} />
+      <mesh ref={nebulaFarRef} position={[6, 8, -118]} rotation={[-0.32, -0.18, 0.2]} renderOrder={-36}>
+        <planeGeometry args={[236, 144, 1, 1]} />
+        <shaderMaterial
+          ref={nebulaFarMaterialRef}
+          uniforms={nebulaFarUniforms}
+          vertexShader={NEBULA_VERTEX_SHADER}
+          fragmentShader={NEBULA_FRAGMENT_SHADER}
+          transparent
+          depthWrite={false}
+          depthTest
+          blending={THREE.AdditiveBlending}
+          toneMapped={false}
+          side={THREE.DoubleSide}
+        />
+      </mesh>
+
+      <group ref={baseGroupRef} position={[0, 0, -32]} renderOrder={-30} frustumCulled={false}>
+        <instancedMesh
+          ref={baseMeshRef}
+          args={[undefined, undefined, neutralBaseStars.count]}
+          renderOrder={-30}
+          frustumCulled={false}
+        >
+          <sphereGeometry args={[2, 10, 10]} />
           <meshBasicMaterial
-            color="#e8f1ff"
+            color="#d7e4f4"
             transparent={false}
             depthWrite={false}
             depthTest
+            stencilWrite
+            stencilRef={1}
+            stencilFunc={THREE.NotEqualStencilFunc}
+            stencilFail={THREE.KeepStencilOp}
+            stencilZFail={THREE.KeepStencilOp}
+            stencilZPass={THREE.KeepStencilOp}
             blending={THREE.NormalBlending}
             fog={false}
             toneMapped={false}
@@ -1768,20 +3011,73 @@ function NeutralStarField({ reducedMotion }: { reducedMotion: boolean }) {
         </instancedMesh>
       </group>
 
-      <group ref={overlayGroupRef} renderOrder={-29} frustumCulled={false}>
-        <instancedMesh ref={overlayMeshRef} args={[undefined, undefined, neutralOverlayStars.count]} frustumCulled={false}>
-          <sphereGeometry args={[2, 6, 6]} />
+      <group ref={midGroupRef} position={[0, 0, -32]} renderOrder={-31} frustumCulled={false}>
+        <instancedMesh
+          ref={midMeshRef}
+          args={[undefined, undefined, neutralMidStars.count]}
+          renderOrder={-31}
+          frustumCulled={false}
+        >
+          <sphereGeometry args={[2, 10, 10]} />
           <meshBasicMaterial
-            color="#f6fbff"
+            color="#cfddf0"
             transparent={false}
             depthWrite={false}
             depthTest
+            stencilWrite
+            stencilRef={1}
+            stencilFunc={THREE.NotEqualStencilFunc}
+            stencilFail={THREE.KeepStencilOp}
+            stencilZFail={THREE.KeepStencilOp}
+            stencilZPass={THREE.KeepStencilOp}
             blending={THREE.NormalBlending}
             fog={false}
             toneMapped={false}
           />
         </instancedMesh>
       </group>
+
+      <group ref={overlayGroupRef} position={[0, 0, -32]} renderOrder={-29} frustumCulled={false}>
+        <instancedMesh
+          ref={overlayMeshRef}
+          args={[undefined, undefined, neutralOverlayStars.count]}
+          renderOrder={-29}
+          frustumCulled={false}
+        >
+          <sphereGeometry args={[2, 10, 10]} />
+          <meshBasicMaterial
+            color="#e5eefb"
+            transparent={false}
+            depthWrite={false}
+            depthTest
+            stencilWrite
+            stencilRef={1}
+            stencilFunc={THREE.NotEqualStencilFunc}
+            stencilFail={THREE.KeepStencilOp}
+            stencilZFail={THREE.KeepStencilOp}
+            stencilZPass={THREE.KeepStencilOp}
+            blending={THREE.NormalBlending}
+            fog={false}
+            toneMapped={false}
+          />
+        </instancedMesh>
+      </group>
+
+      <mesh ref={nebulaNearRef} position={[-8, -6, -90]} rotation={[0.2, 0.22, -0.34]} renderOrder={-33}>
+        <planeGeometry args={[178, 110, 1, 1]} />
+        <shaderMaterial
+          ref={nebulaNearMaterialRef}
+          uniforms={nebulaNearUniforms}
+          vertexShader={NEBULA_VERTEX_SHADER}
+          fragmentShader={NEBULA_FRAGMENT_SHADER}
+          transparent
+          depthWrite={false}
+          depthTest
+          blending={THREE.AdditiveBlending}
+          toneMapped={false}
+          side={THREE.DoubleSide}
+        />
+      </mesh>
     </>
   )
 }
@@ -2141,6 +3437,17 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
         />
       )}
 
+      <mesh
+        renderOrder={-15}
+        frustumCulled={false}
+        onAfterRender={(renderer: THREE.WebGLRenderer) => {
+          renderer.clearDepth()
+        }}
+      >
+        <planeGeometry args={[0.001, 0.001]} />
+        <meshBasicMaterial colorWrite={false} depthWrite={false} depthTest={false} toneMapped={false} />
+      </mesh>
+
       <NeutralStarField reducedMotion={reducedMotion} />
 
       <OrbitControls
@@ -2179,7 +3486,7 @@ export function ConstellationScene(props: ConstellationSceneProps) {
       style={{ position: 'absolute', inset: 0 }}
       camera={{ position: [0, 1.8, 8.4], fov: 54, near: 0.1, far: 150 }}
       dpr={[1, 2]}
-      gl={{ antialias: true, alpha: false, powerPreference: 'high-performance' }}
+      gl={{ antialias: true, alpha: false, stencil: true, powerPreference: 'high-performance' }}
       onCreated={({ gl }) => {
         gl.toneMapping = THREE.ACESFilmicToneMapping
         gl.toneMappingExposure = 1.0
