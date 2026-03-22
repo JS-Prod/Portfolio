@@ -85,15 +85,32 @@ type HeroParticleField = {
   count: number
 }
 
-type FlowRibbonField = {
-  ribbonCount: number
-  segmentCount: number
+type EtherealFilamentConfig = {
+  filamentCount: number
+  trailLength: number
+  orbitStrength: number
+  windStrength: number
+  drag: number
+  shellDistance: number
+  filamentWidth: number
+  emissionIntensity: number
+  noiseSpeed: number
+  radialDrift: number
+  containment: number
+  crossSectionSegments: number
+}
+
+type EtherealFilamentField = {
+  config: EtherealFilamentConfig
+  ringCount: number
   phases: Float32Array
-  speeds: Float32Array
+  orbitScales: Float32Array
   radii: Float32Array
-  lifts: Float32Array
-  twists: Float32Array
-  widths: Float32Array
+  widthScales: Float32Array
+  axisVectors: Float32Array
+  headPositions: Float32Array
+  headVelocities: Float32Array
+  history: Float32Array
   geometry: THREE.BufferGeometry
   positionAttribute: THREE.BufferAttribute
 }
@@ -162,6 +179,88 @@ void main() {
 }
 `
 
+const CORE_DUST_VERTEX_SHADER = `
+varying vec3 vLocalPos;
+varying vec3 vWorldPos;
+
+void main() {
+  vLocalPos = position;
+  vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+  vWorldPos = worldPosition.xyz;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`
+
+const CORE_DUST_FRAGMENT_SHADER = `
+uniform float uTime;
+uniform vec3 uColor;
+uniform vec3 uSecondary;
+uniform float uOpacity;
+
+varying vec3 vLocalPos;
+varying vec3 vWorldPos;
+
+float hash3(vec3 p) {
+  return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
+}
+
+float noise3(vec3 p) {
+  vec3 i = floor(p);
+  vec3 f = fract(p);
+  vec3 u = f * f * (3.0 - 2.0 * f);
+
+  float n000 = hash3(i + vec3(0.0, 0.0, 0.0));
+  float n100 = hash3(i + vec3(1.0, 0.0, 0.0));
+  float n010 = hash3(i + vec3(0.0, 1.0, 0.0));
+  float n110 = hash3(i + vec3(1.0, 1.0, 0.0));
+  float n001 = hash3(i + vec3(0.0, 0.0, 1.0));
+  float n101 = hash3(i + vec3(1.0, 0.0, 1.0));
+  float n011 = hash3(i + vec3(0.0, 1.0, 1.0));
+  float n111 = hash3(i + vec3(1.0, 1.0, 1.0));
+
+  float nx00 = mix(n000, n100, u.x);
+  float nx10 = mix(n010, n110, u.x);
+  float nx01 = mix(n001, n101, u.x);
+  float nx11 = mix(n011, n111, u.x);
+  float nxy0 = mix(nx00, nx10, u.y);
+  float nxy1 = mix(nx01, nx11, u.y);
+  return mix(nxy0, nxy1, u.z);
+}
+
+float fbm3(vec3 p) {
+  float value = 0.0;
+  float amplitude = 0.5;
+
+  for (int i = 0; i < 4; i++) {
+    value += amplitude * noise3(p);
+    p = p * 2.03 + vec3(13.7, 7.1, 5.3);
+    amplitude *= 0.5;
+  }
+
+  return value;
+}
+
+void main() {
+  float radius = length(vLocalPos);
+  float radial = 1.0 - smoothstep(0.26, 0.98, radius);
+  vec3 drift = vec3(uTime * 0.2, -uTime * 0.14, uTime * 0.16);
+  vec3 flowPos = vLocalPos * 2.25 + drift;
+  float cloudA = fbm3(flowPos);
+  float cloudB = fbm3(flowPos * 1.85 + vec3(4.2, 1.4, 2.9));
+  float cloud = mix(cloudA, cloudB, 0.46);
+  float wisps = smoothstep(0.24, 0.9, cloud);
+  float core = smoothstep(0.0, 0.55, radial);
+  float sparkle = 0.9 + sin(dot(vWorldPos, vec3(1.2, 0.7, 1.5)) + uTime * 0.65) * 0.1;
+  float alpha = (wisps * radial * 0.9 + core * 0.28) * uOpacity * sparkle;
+  alpha = clamp(alpha, 0.0, 0.92);
+
+  vec3 color = mix(uSecondary, uColor, 0.3 + cloud * 0.7);
+  color *= 0.4 + cloud * 0.9 + core * 0.26;
+
+  gl_FragColor = vec4(color, alpha);
+}
+`
+
 const SHELL_VERTEX_SHADER = `
 varying vec3 vNormal;
 varying vec3 vWorldPos;
@@ -190,51 +289,61 @@ void main() {
   float flow = 0.5 + 0.5 * sin((vWorldPos.y * 6.2 + vWorldPos.x * 2.1) + uTime * 0.58);
   float shell = 0.72 + flow * 0.28;
 
-  vec3 color = uColor * (0.72 + flow * 0.22 + edge * 0.16);
-  float alpha = (0.28 + flow * 0.18 + edge * 0.08) * uIntensity;
+  vec3 color = uColor * (0.72 + flow * 0.22 + edge * 0.16) * (1.0 + uIntensity * 0.16);
+  float alpha = clamp((0.28 + flow * 0.2 + edge * 0.2) * uIntensity, 0.0, 0.9);
   gl_FragColor = vec4(color, alpha);
 }
 `
 
-const LIQUID_RIBBON_VERTEX_SHADER = `
+const ETHEREAL_FILAMENT_VERTEX_SHADER = `
 varying vec2 vUv;
+varying vec3 vWorldPos;
+varying vec3 vNormal;
 
 void main() {
   vUv = uv;
+  vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+  vWorldPos = worldPosition.xyz;
+  vNormal = normalize(normalMatrix * normal);
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }
 `
 
-const LIQUID_RIBBON_FRAGMENT_SHADER = `
+const ETHEREAL_FILAMENT_FRAGMENT_SHADER = `
 uniform vec3 uColor;
 uniform vec3 uSecondary;
 uniform float uTime;
 uniform float uOpacity;
 uniform float uIntensity;
+uniform float uEmission;
+uniform float uNoiseSpeed;
 
 varying vec2 vUv;
+varying vec3 vWorldPos;
+varying vec3 vNormal;
 
 void main() {
-  float x = vUv.x * 2.0 - 1.0;
-  float body = exp(-pow(abs(x) / 0.66, 1.75));
-  float edgeSoft = 1.0 - smoothstep(0.82, 1.0, abs(x));
-  float head = smoothstep(0.0, 0.14, vUv.y);
-  float tail = 1.0 - smoothstep(0.86, 1.0, vUv.y);
-  float along = head * tail;
+  float along = vUv.y;
+  float head = smoothstep(0.0, 0.12, along);
+  float tail = 1.0 - smoothstep(0.72, 1.0, along);
+  float taper = head * tail;
 
-  float ripple = sin(vUv.y * 8.0 - uTime * 1.2 + x * 1.1) * 0.5 + 0.5;
-  float filament = sin(vUv.y * 5.5 + uTime * 0.8 - x * 0.8) * 0.5 + 0.5;
-  float textureAlpha = 0.72 + ripple * 0.14 + filament * 0.08;
-  float alpha = along * body * edgeSoft * textureAlpha * uOpacity;
-  alpha = min(alpha, 0.44);
+  float worldFlow = dot(vWorldPos, vec3(0.52, 0.34, 0.47));
+  float stream = sin(along * 11.0 - uTime * uNoiseSpeed + worldFlow * 0.42) * 0.5 + 0.5;
+  float shimmer = sin(along * 24.0 + uTime * (uNoiseSpeed * 0.48) - worldFlow * 0.36) * 0.5 + 0.5;
 
-  if (alpha < 0.0005) {
-    discard;
-  }
+  vec3 normal = normalize(vNormal);
+  vec3 viewDir = normalize(cameraPosition - vWorldPos);
+  float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 1.15);
+  float mist = (0.42 + taper * 0.58) * (0.62 + fresnel * 0.38);
+  float core = taper * (0.2 + stream * 0.2);
+  float pulse = 0.64 + stream * 0.16 + shimmer * 0.12;
 
-  vec3 color = mix(uSecondary, uColor, 0.22 + body * 0.78);
-  color *= 0.78 + ripple * 0.14 + uIntensity * 0.22;
+  vec3 color = mix(uSecondary, uColor, 0.22 + stream * 0.78);
+  color *= pulse * (0.3 + uIntensity * 0.44) * (0.72 + (core + mist) * uEmission * 0.4);
 
+  float alpha = uOpacity * (mist * 0.74 + core * 0.26) * (0.44 + uIntensity * 0.38);
+  alpha = min(alpha * 0.78, 0.3);
   gl_FragColor = vec4(color, alpha);
 }
 `
@@ -283,110 +392,6 @@ void main() {
   gl_FragColor = vec4(color, alpha);
 }
 `
-
-function createParticleTexture(kind: 'liquid' | 'dust' | 'spark') {
-  const size = 128
-  const canvas = document.createElement('canvas')
-  canvas.width = size
-  canvas.height = size
-  const ctx = canvas.getContext('2d')
-
-  if (!ctx) {
-    const fallback = new THREE.Texture()
-    fallback.needsUpdate = true
-    return fallback
-  }
-
-  ctx.clearRect(0, 0, size, size)
-
-  if (kind === 'liquid') {
-    ctx.save()
-    ctx.translate(size * 0.5, size * 0.5)
-    ctx.rotate(-0.6)
-
-    const drop = ctx.createLinearGradient(-size * 0.4, 0, size * 0.5, 0)
-    drop.addColorStop(0, 'rgba(255,255,255,0)')
-    drop.addColorStop(0.3, 'rgba(255,255,255,0.44)')
-    drop.addColorStop(0.65, 'rgba(255,255,255,0.92)')
-    drop.addColorStop(1, 'rgba(255,255,255,0)')
-    ctx.fillStyle = drop
-    ctx.beginPath()
-    ctx.moveTo(-size * 0.42, 0)
-    ctx.bezierCurveTo(-size * 0.16, -size * 0.18, size * 0.16, -size * 0.14, size * 0.42, 0)
-    ctx.bezierCurveTo(size * 0.16, size * 0.14, -size * 0.16, size * 0.18, -size * 0.42, 0)
-    ctx.closePath()
-    ctx.fill()
-
-    const highlight = ctx.createRadialGradient(size * 0.08, -size * 0.04, 0, size * 0.08, -size * 0.04, size * 0.16)
-    highlight.addColorStop(0, 'rgba(255,255,255,0.96)')
-    highlight.addColorStop(1, 'rgba(255,255,255,0)')
-    ctx.fillStyle = highlight
-    ctx.beginPath()
-    ctx.arc(size * 0.08, -size * 0.04, size * 0.16, 0, Math.PI * 2)
-    ctx.fill()
-
-    const wake = ctx.createLinearGradient(-size * 0.46, 0, -size * 0.06, 0)
-    wake.addColorStop(0, 'rgba(255,255,255,0)')
-    wake.addColorStop(1, 'rgba(255,255,255,0.4)')
-    ctx.fillStyle = wake
-    ctx.beginPath()
-    ctx.ellipse(-size * 0.24, 0, size * 0.3, size * 0.08, 0, 0, Math.PI * 2)
-    ctx.fill()
-
-    ctx.restore()
-  } else if (kind === 'dust') {
-    const random = createRandom(9327)
-    const base = ctx.createRadialGradient(size * 0.5, size * 0.5, 0, size * 0.5, size * 0.5, size * 0.5)
-    base.addColorStop(0, 'rgba(255,255,255,0.18)')
-    base.addColorStop(0.5, 'rgba(255,255,255,0.08)')
-    base.addColorStop(1, 'rgba(255,255,255,0)')
-    ctx.fillStyle = base
-    ctx.beginPath()
-    ctx.arc(size * 0.5, size * 0.5, size * 0.5, 0, Math.PI * 2)
-    ctx.fill()
-
-    for (let i = 0; i < 20; i += 1) {
-      const x = size * (0.16 + random() * 0.68)
-      const y = size * (0.16 + random() * 0.68)
-      const r = size * (0.13 + random() * 0.24)
-      const alpha = 0.06 + random() * 0.08
-      const cloud = ctx.createRadialGradient(x, y, 0, x, y, r)
-      cloud.addColorStop(0, `rgba(255,255,255,${alpha})`)
-      cloud.addColorStop(0.72, `rgba(255,255,255,${alpha * 0.42})`)
-      cloud.addColorStop(1, 'rgba(255,255,255,0)')
-      ctx.fillStyle = cloud
-      ctx.beginPath()
-      ctx.arc(x, y, r, 0, Math.PI * 2)
-      ctx.fill()
-    }
-  } else {
-    const star = ctx.createRadialGradient(size * 0.5, size * 0.5, 0, size * 0.5, size * 0.5, size * 0.5)
-    star.addColorStop(0, 'rgba(255,255,255,1)')
-    star.addColorStop(0.26, 'rgba(255,255,255,0.95)')
-    star.addColorStop(0.6, 'rgba(255,255,255,0.3)')
-    star.addColorStop(1, 'rgba(255,255,255,0)')
-    ctx.fillStyle = star
-    ctx.beginPath()
-    ctx.arc(size * 0.5, size * 0.5, size * 0.5, 0, Math.PI * 2)
-    ctx.fill()
-
-    ctx.strokeStyle = 'rgba(255,255,255,0.6)'
-    ctx.lineWidth = 2
-    ctx.beginPath()
-    ctx.moveTo(size * 0.5, size * 0.12)
-    ctx.lineTo(size * 0.5, size * 0.88)
-    ctx.moveTo(size * 0.12, size * 0.5)
-    ctx.lineTo(size * 0.88, size * 0.5)
-    ctx.stroke()
-  }
-
-  const texture = new THREE.CanvasTexture(canvas)
-  texture.wrapS = THREE.ClampToEdgeWrapping
-  texture.wrapT = THREE.ClampToEdgeWrapping
-  texture.generateMipmaps = true
-  texture.needsUpdate = true
-  return texture
-}
 
 const NEBULA_VERTEX_SHADER = `
 varying vec2 vUv;
@@ -607,6 +612,51 @@ function HeroCoreGeometry({ kind }: { kind: HeroKind }) {
   return <icosahedronGeometry args={[0.52, 0]} />
 }
 
+const ETHEREAL_FILAMENT_PRESETS: Record<HeroKind, EtherealFilamentConfig> = {
+  storm: {
+    filamentCount: 4,
+    trailLength: 56,
+    orbitStrength: 3.1,
+    windStrength: 2.2,
+    drag: 1.7,
+    shellDistance: 1.38,
+    filamentWidth: 0.058,
+    emissionIntensity: 0.98,
+    noiseSpeed: 1.4,
+    radialDrift: 0.2,
+    containment: 2.8,
+    crossSectionSegments: 14,
+  },
+  harmonic: {
+    filamentCount: 3,
+    trailLength: 62,
+    orbitStrength: 2.7,
+    windStrength: 1.8,
+    drag: 1.55,
+    shellDistance: 1.24,
+    filamentWidth: 0.052,
+    emissionIntensity: 0.92,
+    noiseSpeed: 1.1,
+    radialDrift: 0.16,
+    containment: 2.45,
+    crossSectionSegments: 14,
+  },
+  pulse: {
+    filamentCount: 3,
+    trailLength: 54,
+    orbitStrength: 2.9,
+    windStrength: 1.95,
+    drag: 1.65,
+    shellDistance: 1.3,
+    filamentWidth: 0.055,
+    emissionIntensity: 0.95,
+    noiseSpeed: 1.28,
+    radialDrift: 0.18,
+    containment: 2.62,
+    crossSectionSegments: 14,
+  },
+}
+
 function createParticleField(style: HeroStyle, seed: string, profile: 'stream' | 'dust'): HeroParticleField {
   const profileScale =
     profile === 'stream'
@@ -686,81 +736,131 @@ function createParticleField(style: HeroStyle, seed: string, profile: 'stream' |
   }
 }
 
-function createFlowRibbonField(style: HeroStyle, seed: string): FlowRibbonField {
-  const random = createRandom(getHash(seed) + 4096)
-  const ribbonCount = 3
-  const segmentCount = style.kind === 'storm' ? 42 : style.kind === 'harmonic' ? 46 : 42
-  const phases = new Float32Array(ribbonCount)
-  const speeds = new Float32Array(ribbonCount)
-  const radii = new Float32Array(ribbonCount)
-  const lifts = new Float32Array(ribbonCount)
-  const twists = new Float32Array(ribbonCount)
-  const widths = new Float32Array(ribbonCount)
-  const vertexCount = ribbonCount * segmentCount * 2
+function createEtherealFilamentField(style: HeroStyle, seed: string): EtherealFilamentField {
+  const config = { ...ETHEREAL_FILAMENT_PRESETS[style.kind] }
+  const random = createRandom(getHash(seed) + 8192)
+  const ringCount = config.crossSectionSegments + 1
+  const vertexCount = config.filamentCount * config.trailLength * ringCount
   const positions = new Float32Array(vertexCount * 3)
   const uvs = new Float32Array(vertexCount * 2)
-  const indices = new Uint16Array(ribbonCount * (segmentCount - 1) * 6)
+  const indices = new Uint16Array(config.filamentCount * (config.trailLength - 1) * config.crossSectionSegments * 6)
+  const phases = new Float32Array(config.filamentCount)
+  const orbitScales = new Float32Array(config.filamentCount)
+  const radii = new Float32Array(config.filamentCount)
+  const widthScales = new Float32Array(config.filamentCount)
+  const axisVectors = new Float32Array(config.filamentCount * 3)
+  const headPositions = new Float32Array(config.filamentCount * 3)
+  const headVelocities = new Float32Array(config.filamentCount * 3)
+  const history = new Float32Array(config.filamentCount * config.trailLength * 3)
+  const axis = new THREE.Vector3()
+  const direction = new THREE.Vector3()
+  const tangent = new THREE.Vector3()
 
   let indexOffset = 0
 
-  for (let ribbon = 0; ribbon < ribbonCount; ribbon += 1) {
-    phases[ribbon] = random() * Math.PI * 2
-    speeds[ribbon] = 0.55 + random() * 1.15
-    radii[ribbon] = style.kind === 'harmonic' ? 0.9 + random() * 0.85 : 1.0 + random() * 1.0
-    lifts[ribbon] = random() * 2 - 1
-    twists[ribbon] = random() * 1.1 + 0.25
-    widths[ribbon] = 0.65 + random() * 0.85
+  for (let filament = 0; filament < config.filamentCount; filament += 1) {
+    const phase = random() * Math.PI * 2
+    phases[filament] = phase
+    orbitScales[filament] = 0.78 + random() * 0.64
+    radii[filament] = config.shellDistance * (0.82 + random() * 0.42)
+    widthScales[filament] = 0.82 + random() * 0.48
 
-    const ribbonVertexBase = ribbon * segmentCount * 2
+    axis.set(random() * 2 - 1, random() * 2 - 1, random() * 2 - 1)
+    if (axis.lengthSq() < 0.000001) {
+      axis.set(0, 1, 0)
+    } else {
+      axis.normalize()
+    }
 
-    for (let segment = 0; segment < segmentCount; segment += 1) {
-      const along = segment / (segmentCount - 1)
-      const leftVertex = ribbonVertexBase + segment * 2
-      const rightVertex = leftVertex + 1
+    const axisOffset = filament * 3
+    axisVectors[axisOffset] = axis.x
+    axisVectors[axisOffset + 1] = axis.y
+    axisVectors[axisOffset + 2] = axis.z
 
-      uvs[leftVertex * 2] = 0
-      uvs[leftVertex * 2 + 1] = along
-      uvs[rightVertex * 2] = 1
-      uvs[rightVertex * 2 + 1] = along
+    const azimuth = random() * Math.PI * 2
+    const z = random() * 2 - 1
+    const radial = Math.sqrt(Math.max(0, 1 - z * z))
+    direction.set(Math.cos(azimuth) * radial, z, Math.sin(azimuth) * radial)
+    direction.multiplyScalar(radii[filament])
 
-      if (segment === segmentCount - 1) {
+    const headOffset = filament * 3
+    headPositions[headOffset] = direction.x
+    headPositions[headOffset + 1] = direction.y
+    headPositions[headOffset + 2] = direction.z
+
+    tangent.crossVectors(axis, direction)
+    if (tangent.lengthSq() < 0.000001) {
+      tangent.crossVectors(WORLD_UP, direction)
+    }
+    if (tangent.lengthSq() < 0.000001) {
+      tangent.crossVectors(X_AXIS, direction)
+    }
+    tangent.normalize()
+    tangent.multiplyScalar(config.orbitStrength * orbitScales[filament] * 0.32)
+    headVelocities[headOffset] = tangent.x
+    headVelocities[headOffset + 1] = tangent.y
+    headVelocities[headOffset + 2] = tangent.z
+
+    const filamentVertexBase = filament * config.trailLength * ringCount
+    for (let segment = 0; segment < config.trailLength; segment += 1) {
+      const along = segment / Math.max(1, config.trailLength - 1)
+      const historyOffset = (filament * config.trailLength + segment) * 3
+      history[historyOffset] = direction.x
+      history[historyOffset + 1] = direction.y
+      history[historyOffset + 2] = direction.z
+
+      for (let ring = 0; ring < ringCount; ring += 1) {
+        const vertex = filamentVertexBase + segment * ringCount + ring
+        uvs[vertex * 2] = ring / config.crossSectionSegments
+        uvs[vertex * 2 + 1] = along
+      }
+
+      if (segment >= config.trailLength - 1) {
         continue
       }
 
-      const nextLeft = leftVertex + 2
-      const nextRight = rightVertex + 2
+      for (let ring = 0; ring < config.crossSectionSegments; ring += 1) {
+        const current = filamentVertexBase + segment * ringCount + ring
+        const currentNext = current + 1
+        const next = current + ringCount
+        const nextNext = next + 1
 
-      indices[indexOffset] = leftVertex
-      indices[indexOffset + 1] = nextLeft
-      indices[indexOffset + 2] = rightVertex
-      indices[indexOffset + 3] = nextLeft
-      indices[indexOffset + 4] = nextRight
-      indices[indexOffset + 5] = rightVertex
-      indexOffset += 6
+        indices[indexOffset] = current
+        indices[indexOffset + 1] = next
+        indices[indexOffset + 2] = currentNext
+        indices[indexOffset + 3] = next
+        indices[indexOffset + 4] = nextNext
+        indices[indexOffset + 5] = currentNext
+        indexOffset += 6
+      }
     }
   }
 
   const positionAttribute = new THREE.BufferAttribute(positions, 3)
   positionAttribute.setUsage(THREE.DynamicDrawUsage)
-
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute('position', positionAttribute)
   geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2))
   geometry.setIndex(new THREE.BufferAttribute(indices, 1))
   geometry.computeBoundingSphere()
 
-  return {
-    ribbonCount,
-    segmentCount,
+  const field: EtherealFilamentField = {
+    config,
+    ringCount,
     phases,
-    speeds,
+    orbitScales,
     radii,
-    lifts,
-    twists,
-    widths,
+    widthScales,
+    axisVectors,
+    headPositions,
+    headVelocities,
+    history,
     geometry,
     positionAttribute,
   }
+
+  updateEtherealFilamentGeometry(field)
+  return field
 }
 
 function createWireTraceGraph(shellScale: number): WireTraceGraph {
@@ -836,52 +936,208 @@ function pickNextTraceNode(
   return candidates[Math.floor(random() * candidates.length)]
 }
 
-function sampleRibbonPoint(
-  style: HeroStyle,
-  phase: number,
-  speed: number,
-  radius: number,
-  lift: number,
-  twist: number,
-  elapsed: number,
-  along: number,
-  spread: number,
-  target: THREE.Vector3,
-) {
-  const flow = elapsed * (0.5 + speed * 0.34) - along * (1.6 + twist * 1.1)
+function sampleFilamentWind(position: THREE.Vector3, time: number, phase: number, target: THREE.Vector3) {
+  const px = position.x
+  const py = position.y
+  const pz = position.z
 
-  if (style.kind === 'storm') {
-    const swirl = phase + flow * 1.32
-    const radial = radius * (0.84 + Math.sin(elapsed * 0.72 + phase + along * 4.0) * 0.2)
-    target.set(
-      Math.cos(swirl) * radial + Math.sin(flow * 2.05 + phase * 1.3) * 0.26,
-      lift * 0.62 + Math.sin(flow * 1.42 + phase * 2.3) * (0.22 + radius * 0.08),
-      Math.sin(swirl) * radial + Math.cos(flow * 1.76 + phase * 0.9) * 0.24,
-    )
-    target.multiplyScalar(spread)
-    return
-  }
-
-  if (style.kind === 'harmonic') {
-    const helix = phase + flow * 1.06
-    const radial = radius * (0.74 + Math.sin(elapsed * 0.6 + along * 3.2 + phase) * 0.16)
-    target.set(
-      Math.cos(helix) * radial + Math.sin(flow * 1.5 + phase * 1.7) * 0.16,
-      lift * 0.86 + Math.sin(flow * 1.08 + phase) * 0.52 + Math.cos(flow * 0.82 + phase * 1.2) * 0.18,
-      Math.sin(helix) * radial + Math.cos(flow * 1.42 + phase * 1.6) * 0.16,
-    )
-    target.multiplyScalar(spread)
-    return
-  }
-
-  const figure = phase + flow * 1.14
-  const radial = radius * (0.76 + Math.sin(elapsed * 0.66 + along * 4.4 + phase) * 0.18)
   target.set(
-    Math.sin(figure) * radial * 1.02 + Math.sin(flow * 1.64 + phase * 1.2) * 0.2,
-    lift * 0.5 + Math.sin(figure * 1.4) * (0.25 + radius * 0.07) + Math.cos(flow * 1.18 + phase) * 0.08,
-    Math.sin(figure * 1.92) * radial * 0.76 + Math.cos(flow * 1.54 + phase * 1.4) * 0.2,
+    Math.sin(py * 1.48 + pz * 1.08 + time * 0.9 + phase * 1.7) +
+      Math.cos(px * 1.12 - time * 0.62 + phase * 0.8),
+    Math.sin(pz * 1.22 + px * 0.96 - time * 0.84 + phase * 1.3) +
+      Math.cos(py * 1.36 + time * 0.52 - phase * 0.7),
+    Math.sin(px * 1.31 + py * 0.92 + time * 0.74 - phase * 1.2) +
+      Math.cos(pz * 1.28 - time * 0.68 + phase * 0.6),
   )
-  target.multiplyScalar(spread)
+
+  if (target.lengthSq() < 0.000001) {
+    target.set(0, 0, 0)
+  } else {
+    target.normalize()
+  }
+}
+
+function updateEtherealFilamentSimulation(
+  field: EtherealFilamentField,
+  elapsed: number,
+  delta: number,
+  spread: number,
+  reducedMotion: boolean,
+) {
+  const { config, headPositions, headVelocities, history, phases, orbitScales, radii, axisVectors } = field
+  const clampedDelta = Math.min(delta, 1 / 24)
+  const motionScale = reducedMotion ? 0.5 : 1
+  const head = new THREE.Vector3()
+  const velocity = new THREE.Vector3()
+  const axis = new THREE.Vector3()
+  const radial = new THREE.Vector3()
+  const tangent = new THREE.Vector3()
+  const orbitForce = new THREE.Vector3()
+  const containment = new THREE.Vector3()
+  const windForce = new THREE.Vector3()
+  const acceleration = new THREE.Vector3()
+  const damping = Math.exp(-config.drag * clampedDelta * motionScale)
+
+  for (let filament = 0; filament < config.filamentCount; filament += 1) {
+    const offset = filament * 3
+    head.set(headPositions[offset], headPositions[offset + 1], headPositions[offset + 2])
+    velocity.set(headVelocities[offset], headVelocities[offset + 1], headVelocities[offset + 2])
+    axis.set(axisVectors[offset], axisVectors[offset + 1], axisVectors[offset + 2]).normalize()
+
+    const radius = Math.max(head.length(), 0.0001)
+    radial.copy(head).multiplyScalar(1 / radius)
+    tangent.crossVectors(axis, radial)
+    if (tangent.lengthSq() < 0.000001) {
+      tangent.crossVectors(WORLD_UP, radial)
+    }
+    if (tangent.lengthSq() < 0.000001) {
+      tangent.crossVectors(X_AXIS, radial)
+    }
+    tangent.normalize()
+
+    const orbitGain = config.orbitStrength * orbitScales[filament] * motionScale
+    orbitForce.copy(tangent).multiplyScalar(orbitGain)
+
+    const targetRadius = THREE.MathUtils.lerp(0.08, radii[filament], spread)
+    const radialWave = Math.sin(elapsed * (0.56 + orbitScales[filament] * 0.2) + phases[filament] * 1.3) * config.radialDrift
+    containment.copy(radial).multiplyScalar((targetRadius + radialWave - radius) * config.containment * motionScale)
+
+    sampleFilamentWind(head, elapsed * config.noiseSpeed, phases[filament], windForce)
+    windForce.multiplyScalar(config.windStrength * motionScale)
+
+    acceleration.copy(orbitForce).add(containment).add(windForce)
+    velocity.addScaledVector(acceleration, clampedDelta)
+    velocity.multiplyScalar(damping)
+
+    const maxSpeed = (config.orbitStrength * 2.2 + config.windStrength * 1.45) * motionScale
+    if (velocity.lengthSq() > maxSpeed * maxSpeed) {
+      velocity.setLength(maxSpeed)
+    }
+
+    head.addScaledVector(velocity, clampedDelta)
+    const collapsePull = (1 - spread) * (reducedMotion ? 0.9 : 1.4)
+    if (collapsePull > 0.0001) {
+      head.multiplyScalar(Math.max(0, 1 - collapsePull * clampedDelta))
+    }
+
+    headPositions[offset] = head.x
+    headPositions[offset + 1] = head.y
+    headPositions[offset + 2] = head.z
+    headVelocities[offset] = velocity.x
+    headVelocities[offset + 1] = velocity.y
+    headVelocities[offset + 2] = velocity.z
+
+    const baseHistoryOffset = filament * config.trailLength * 3
+    for (let segment = config.trailLength - 1; segment > 0; segment -= 1) {
+      const currentOffset = baseHistoryOffset + segment * 3
+      const previousOffset = currentOffset - 3
+      history[currentOffset] = history[previousOffset]
+      history[currentOffset + 1] = history[previousOffset + 1]
+      history[currentOffset + 2] = history[previousOffset + 2]
+    }
+
+    history[baseHistoryOffset] = head.x
+    history[baseHistoryOffset + 1] = head.y
+    history[baseHistoryOffset + 2] = head.z
+  }
+}
+
+function updateEtherealFilamentGeometry(field: EtherealFilamentField) {
+  const { config, ringCount, axisVectors, widthScales, history, positionAttribute } = field
+  const positions = positionAttribute.array as Float32Array
+  const center = new THREE.Vector3()
+  const next = new THREE.Vector3()
+  const tangent = new THREE.Vector3()
+  const prevTangent = new THREE.Vector3()
+  const normal = new THREE.Vector3()
+  const prevNormal = new THREE.Vector3()
+  const binormal = new THREE.Vector3()
+  const axis = new THREE.Vector3()
+  const transportAxis = new THREE.Vector3()
+  const ringDirection = new THREE.Vector3()
+  const fallback = new THREE.Vector3()
+  const lastSegmentIndex = config.trailLength - 1
+  const twoPi = Math.PI * 2
+  let positionOffset = 0
+
+  for (let filament = 0; filament < config.filamentCount; filament += 1) {
+    const axisOffset = filament * 3
+    axis.set(axisVectors[axisOffset], axisVectors[axisOffset + 1], axisVectors[axisOffset + 2]).normalize()
+    prevTangent.set(0, 0, 0)
+    prevNormal.set(0, 0, 0)
+
+    for (let segment = 0; segment < config.trailLength; segment += 1) {
+      const historyOffset = (filament * config.trailLength + segment) * 3
+      center.set(history[historyOffset], history[historyOffset + 1], history[historyOffset + 2])
+
+      if (segment < lastSegmentIndex) {
+        const nextOffset = historyOffset + 3
+        next.set(history[nextOffset], history[nextOffset + 1], history[nextOffset + 2])
+        tangent.subVectors(next, center)
+      } else if (segment > 0) {
+        const previousOffset = historyOffset - 3
+        next.set(history[previousOffset], history[previousOffset + 1], history[previousOffset + 2])
+        tangent.subVectors(center, next)
+      } else {
+        tangent.set(0, 1, 0)
+      }
+
+      if (tangent.lengthSq() < 0.000001) {
+        tangent.copy(prevTangent.lengthSq() < 0.000001 ? axis : prevTangent)
+      }
+      tangent.normalize()
+
+      if (segment === 0 || prevNormal.lengthSq() < 0.000001 || prevTangent.lengthSq() < 0.000001) {
+        normal.crossVectors(axis, tangent)
+        if (normal.lengthSq() < 0.000001) {
+          fallback.crossVectors(WORLD_UP, tangent)
+          normal.copy(fallback)
+        }
+        if (normal.lengthSq() < 0.000001) {
+          fallback.crossVectors(X_AXIS, tangent)
+          normal.copy(fallback)
+        }
+        normal.normalize()
+      } else {
+        transportAxis.crossVectors(prevTangent, tangent)
+        const axisLengthSq = transportAxis.lengthSq()
+        if (axisLengthSq < 0.000001) {
+          normal.copy(prevNormal)
+        } else {
+          const axisLength = Math.sqrt(axisLengthSq)
+          const angle = Math.atan2(axisLength, THREE.MathUtils.clamp(prevTangent.dot(tangent), -1, 1))
+          transportAxis.multiplyScalar(1 / axisLength)
+          normal.copy(prevNormal).applyAxisAngle(transportAxis, angle)
+        }
+        normal.addScaledVector(tangent, -normal.dot(tangent))
+        if (normal.lengthSq() < 0.000001) {
+          normal.copy(prevNormal)
+        }
+        normal.normalize()
+      }
+
+      binormal.crossVectors(tangent, normal).normalize()
+      prevTangent.copy(tangent)
+      prevNormal.copy(normal)
+
+      const along = segment / Math.max(1, config.trailLength - 1)
+      const headTaper = smoothstep(0.0, 0.1, along)
+      const tailTaper = 1 - smoothstep(0.76, 1.0, along)
+      const profile = headTaper * tailTaper
+      const width = config.filamentWidth * widthScales[filament] * (0.24 + profile * 0.76)
+
+      for (let ring = 0; ring < ringCount; ring += 1) {
+        const angle = (ring / config.crossSectionSegments) * twoPi
+        ringDirection.copy(normal).multiplyScalar(Math.cos(angle)).addScaledVector(binormal, Math.sin(angle))
+        positions[positionOffset] = center.x + ringDirection.x * width
+        positions[positionOffset + 1] = center.y + ringDirection.y * width
+        positions[positionOffset + 2] = center.z + ringDirection.z * width
+        positionOffset += 3
+      }
+    }
+  }
+
+  positionAttribute.needsUpdate = true
 }
 
 function updateParticleField(
@@ -1211,7 +1467,6 @@ function ProjectNode({
 }
 
 function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOnFadeOut }: HeroWorldProps) {
-  const { camera } = useThree()
   const groupRef = useRef<THREE.Group>(null)
   const coreRef = useRef<THREE.Object3D>(null)
   const coreMaskRef = useRef<THREE.Mesh>(null)
@@ -1222,33 +1477,23 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
   const shellOcclusionRef = useRef<THREE.Mesh>(null)
   const shellMaskRef = useRef<THREE.Mesh>(null)
   const shellAccentMaskRef = useRef<THREE.Object3D>(null)
+  const coreDustGroupRef = useRef<THREE.Group>(null)
   const shellTraceGroupRef = useRef<THREE.Group>(null)
   const shellTraceSegmentRef = useRef<THREE.Mesh>(null)
   const shellTraceCoreRef = useRef<THREE.Mesh>(null)
   const streamRibbonRef = useRef<THREE.Mesh>(null)
   const streamPointsRef = useRef<THREE.Points>(null)
-  const dustMeshRef = useRef<THREE.InstancedMesh>(null)
   const coreMaterialRef = useRef<THREE.ShaderMaterial>(null)
+  const coreDustMaterialRef = useRef<THREE.ShaderMaterial>(null)
   const shellMaterialRef = useRef<THREE.ShaderMaterial>(null)
   const streamRibbonMaterialRef = useRef<THREE.ShaderMaterial>(null)
   const streamSwarmMaterialRef = useRef<THREE.ShaderMaterial>(null)
-  const dustMaterialRef = useRef<THREE.MeshBasicMaterial>(null)
   const traceSegmentMaterialRef = useRef<THREE.MeshBasicMaterial>(null)
   const traceCoreMaterialRef = useRef<THREE.MeshBasicMaterial>(null)
   const accentPrimaryMaterialRef = useRef<THREE.MeshBasicMaterial>(null)
   const accentSecondaryMaterialRef = useRef<THREE.MeshBasicMaterial>(null)
   const accentScaleTargetRef = useMemo(() => new THREE.Vector3(1, 1, 1), [])
   const groupScaleTargetRef = useMemo(() => new THREE.Vector3(1, 1, 1), [])
-  const billboardObjectRef = useMemo(() => new THREE.Object3D(), [])
-  const cameraUpRef = useMemo(() => new THREE.Vector3(), [])
-  const cameraDirectionRef = useMemo(() => new THREE.Vector3(), [])
-  const ribbonCenterRef = useMemo(() => new THREE.Vector3(), [])
-  const ribbonNextRef = useMemo(() => new THREE.Vector3(), [])
-  const ribbonTangentRef = useMemo(() => new THREE.Vector3(), [])
-  const ribbonSideRef = useMemo(() => new THREE.Vector3(), [])
-  const ribbonSideFallbackRef = useMemo(() => new THREE.Vector3(), [])
-  const ribbonSideBlendedRef = useMemo(() => new THREE.Vector3(), [])
-  const ribbonPrevSideRef = useMemo(() => new THREE.Vector3(), [])
   const traceStartRef = useMemo(() => new THREE.Vector3(), [])
   const traceEndRef = useMemo(() => new THREE.Vector3(), [])
   const traceDirRef = useMemo(() => new THREE.Vector3(), [])
@@ -1265,13 +1510,11 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
   })
 
   const style = useMemo(() => getHeroStyle(project), [project])
-  const flowRibbons = useMemo(() => createFlowRibbonField(style, `${project.id}-hero-ribbons`), [style, project.id])
+  const etherealFilaments = useMemo(() => createEtherealFilamentField(style, `${project.id}-hero-filaments`), [style, project.id])
   const wireTraceGraph = useMemo(() => createWireTraceGraph(style.shellScale), [style.shellScale])
   const streamParticles = useMemo(() => createParticleField(style, `${project.id}-hero-stream`, 'stream'), [style, project.id])
-  const dustParticles = useMemo(() => createParticleField(style, `${project.id}-hero-dust`, 'dust'), [style, project.id])
   const accentColor = useMemo(() => new THREE.Color(style.accent), [style.accent])
   const secondaryColor = useMemo(() => new THREE.Color(style.secondary), [style.secondary])
-  const dustTexture = useMemo(() => createParticleTexture('dust'), [])
   const silhouetteProfile = useMemo(() => {
     if (style.kind === 'storm') {
       return { core: 1.02, shell: 0.76, ringsPrimary: 1.0, ringsSecondary: 0.94, particles: 1.34 }
@@ -1283,12 +1526,25 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
 
     return { core: 1.0, shell: 0.8, ringsPrimary: 1.08, ringsSecondary: 1.0, particles: 1.22 }
   }, [style.kind])
+  const coreDustRadius = useMemo(() => {
+    if (style.kind === 'harmonic') {
+      return 0.72
+    }
 
-  useEffect(
-    () => () => {
-      dustTexture.dispose()
-    },
-    [dustTexture],
+    if (style.kind === 'pulse') {
+      return 0.68
+    }
+
+    return 0.7
+  }, [style.kind])
+  const coreDustUniforms = useMemo(
+    () => ({
+      uTime: { value: 0 },
+      uColor: { value: secondaryColor.clone() },
+      uSecondary: { value: accentColor.clone() },
+      uOpacity: { value: 1 },
+    }),
+    [accentColor, secondaryColor],
   )
 
   const accentBaseOpacity = useMemo(() => {
@@ -1303,17 +1559,11 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
     return { primary: 0.22, secondary: 0.2 }
   }, [style.kind])
 
-  useEffect(() => {
-    if (dustMeshRef.current) {
-      dustMeshRef.current.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
-    }
-  }, [])
-
   useEffect(
     () => () => {
-      flowRibbons.geometry.dispose()
+      etherealFilaments.geometry.dispose()
     },
-    [flowRibbons],
+    [etherealFilaments],
   )
 
   useEffect(() => {
@@ -1362,6 +1612,8 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       uSecondary: { value: secondaryColor.clone() },
       uOpacity: { value: 0.44 },
       uIntensity: { value: 1 },
+      uEmission: { value: 1 },
+      uNoiseSpeed: { value: 1 },
     }),
     [accentColor, secondaryColor],
   )
@@ -1442,6 +1694,12 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
 
     if (coreRef.current && coreStarBlockerRef.current) {
       coreStarBlockerRef.current.rotation.copy(coreRef.current.rotation)
+    }
+
+    if (coreRef.current && coreDustGroupRef.current) {
+      coreDustGroupRef.current.rotation.copy(coreRef.current.rotation)
+      const cloudPulse = 1 + Math.sin(elapsed * 0.48 + (style.kind === 'harmonic' ? 0.8 : style.kind === 'pulse' ? 1.4 : 0.2)) * 0.04 * intensity
+      coreDustGroupRef.current.scale.setScalar(cloudPulse)
     }
 
     if (shellRef.current) {
@@ -1534,135 +1792,11 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
     }
 
     updateParticleField(streamParticles, style, elapsed * 0.5, frameDelta, intensity, collapseParticlesOnFadeOut)
-    updateParticleField(dustParticles, style, elapsed, frameDelta, intensity, collapseParticlesOnFadeOut)
 
     const collapseBlend = collapseParticlesOnFadeOut ? smoothstep(0.02, 0.8, intensity) : 1
-    const cameraDirection = camera.getWorldDirection(cameraDirectionRef).normalize()
-    const cameraUp = cameraUpRef.setFromMatrixColumn(camera.matrixWorld, 1).normalize()
-
     if (streamRibbonRef.current) {
-      const positionArray = flowRibbons.positionAttribute.array as Float32Array
-      const alongStep = 1 / Math.max(1, flowRibbons.segmentCount - 1)
-      let positionOffset = 0
-
-      for (let ribbon = 0; ribbon < flowRibbons.ribbonCount; ribbon += 1) {
-        const phase = flowRibbons.phases[ribbon]
-        const speed = flowRibbons.speeds[ribbon]
-        const radius = flowRibbons.radii[ribbon]
-        const lift = flowRibbons.lifts[ribbon]
-        const twist = flowRibbons.twists[ribbon]
-        const widthScale = flowRibbons.widths[ribbon]
-        ribbonPrevSideRef.set(0, 0, 0)
-
-        for (let segment = 0; segment < flowRibbons.segmentCount; segment += 1) {
-          const along = segment * alongStep
-          const nextAlong = Math.min(1, along + alongStep)
-
-          sampleRibbonPoint(
-            style,
-            phase,
-            speed,
-            radius,
-            lift,
-            twist,
-            elapsed,
-            along,
-            collapseBlend,
-            ribbonCenterRef,
-          )
-          sampleRibbonPoint(
-            style,
-            phase,
-            speed,
-            radius,
-            lift,
-            twist,
-            elapsed,
-            nextAlong,
-            collapseBlend,
-            ribbonNextRef,
-          )
-
-          ribbonTangentRef.subVectors(ribbonNextRef, ribbonCenterRef)
-          if (ribbonTangentRef.lengthSq() < 0.000001) {
-            ribbonTangentRef.set(0, 1, 0)
-          } else {
-            ribbonTangentRef.normalize()
-          }
-
-          ribbonSideRef.crossVectors(ribbonTangentRef, cameraDirection)
-          const viewAlignedStrength = ribbonSideRef.length()
-          ribbonSideFallbackRef.crossVectors(ribbonTangentRef, cameraUp)
-
-          if (ribbonSideFallbackRef.lengthSq() < 0.000001) {
-            ribbonSideFallbackRef.set(1, 0, 0)
-          } else {
-            ribbonSideFallbackRef.normalize()
-          }
-
-          if (viewAlignedStrength > 0.000001) {
-            ribbonSideRef.normalize()
-            const blend = smoothstep(0.05, 0.24, viewAlignedStrength)
-            ribbonSideBlendedRef
-              .copy(ribbonSideFallbackRef)
-              .multiplyScalar(1 - blend)
-              .addScaledVector(ribbonSideRef, blend)
-              .normalize()
-            ribbonSideRef.copy(ribbonSideBlendedRef)
-          } else {
-            ribbonSideRef.copy(ribbonSideFallbackRef)
-          }
-
-          if (segment > 0 && ribbonPrevSideRef.lengthSq() > 0.000001 && ribbonSideRef.dot(ribbonPrevSideRef) < 0) {
-            ribbonSideRef.multiplyScalar(-1)
-          }
-          ribbonPrevSideRef.copy(ribbonSideRef)
-
-          const head = smoothstep(0.02, 0.3, along)
-          const tail = 1 - smoothstep(0.7, 0.98, along)
-          const profile = smoothstep(0.0, 1.0, head * tail)
-          const pulse = 0.96 + Math.sin(elapsed * 0.18 + phase + along * 4.8) * 0.03
-          const width =
-            (0.035 + widthScale * 0.07) *
-            (0.34 + profile * 0.66) *
-            pulse *
-            (0.2 + intensity * 0.72) *
-            silhouetteProfile.particles
-
-          positionArray[positionOffset] = ribbonCenterRef.x + ribbonSideRef.x * width
-          positionArray[positionOffset + 1] = ribbonCenterRef.y + ribbonSideRef.y * width
-          positionArray[positionOffset + 2] = ribbonCenterRef.z + ribbonSideRef.z * width
-          positionArray[positionOffset + 3] = ribbonCenterRef.x - ribbonSideRef.x * width
-          positionArray[positionOffset + 4] = ribbonCenterRef.y - ribbonSideRef.y * width
-          positionArray[positionOffset + 5] = ribbonCenterRef.z - ribbonSideRef.z * width
-          positionOffset += 6
-        }
-      }
-
-      flowRibbons.positionAttribute.needsUpdate = true
-    }
-
-    if (dustMeshRef.current) {
-      for (let index = 0; index < dustParticles.count; index += 1) {
-        const offset = index * 3
-        const px = dustParticles.positions[offset]
-        const py = dustParticles.positions[offset + 1]
-        const pz = dustParticles.positions[offset + 2]
-        const spin = elapsed * (0.012 + dustParticles.speeds[index] * 0.04) + dustParticles.phases[index]
-        const pulse = 1 + Math.sin(elapsed * 0.24 + dustParticles.phases[index] * 1.2) * 0.1
-        const baseSize = (0.19 + dustParticles.sizes[index] * 0.16) * pulse
-        const width = baseSize * (0.32 + intensity * 0.8) * silhouetteProfile.particles * collapseBlend
-        const height = width * THREE.MathUtils.lerp(0.99, 1.03, dustParticles.flickers[index])
-
-        billboardObjectRef.position.set(px, py, pz)
-        billboardObjectRef.quaternion.copy(camera.quaternion)
-        billboardObjectRef.rotateZ(spin * 0.2)
-        billboardObjectRef.scale.set(width, height, 1)
-        billboardObjectRef.updateMatrix()
-        dustMeshRef.current.setMatrixAt(index, billboardObjectRef.matrix)
-      }
-
-      dustMeshRef.current.instanceMatrix.needsUpdate = true
+      updateEtherealFilamentSimulation(etherealFilaments, elapsed, frameDelta, collapseBlend, reducedMotion)
+      updateEtherealFilamentGeometry(etherealFilaments)
     }
 
     if (streamPointsRef.current) {
@@ -1693,7 +1827,9 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       streamRibbonMaterialRef.current.uniforms.uColor.value.copy(accentColor)
       streamRibbonMaterialRef.current.uniforms.uSecondary.value.copy(secondaryColor).lerp(accentColor, 0.2)
       streamRibbonMaterialRef.current.uniforms.uIntensity.value = intensity * silhouetteProfile.particles
-      streamRibbonMaterialRef.current.uniforms.uOpacity.value = (0.07 + intensity * 0.18) * intensity
+      streamRibbonMaterialRef.current.uniforms.uOpacity.value = (0.045 + intensity * 0.14) * intensity
+      streamRibbonMaterialRef.current.uniforms.uEmission.value = etherealFilaments.config.emissionIntensity
+      streamRibbonMaterialRef.current.uniforms.uNoiseSpeed.value = etherealFilaments.config.noiseSpeed
     }
 
     if (streamSwarmMaterialRef.current) {
@@ -1714,9 +1850,12 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       traceCoreMaterialRef.current.opacity = (0.26 + intensity * 0.72) * intensity
     }
 
-    if (dustMaterialRef.current) {
-      dustMaterialRef.current.color.copy(secondaryColor).lerp(accentColor, 0.26)
-      dustMaterialRef.current.opacity = (0.11 + intensity * 0.4) * intensity * silhouetteProfile.particles * 0.86
+    if (coreDustMaterialRef.current) {
+      coreDustMaterialRef.current.uniforms.uTime.value = elapsed
+      coreDustMaterialRef.current.uniforms.uColor.value.copy(secondaryColor).lerp(accentColor, 0.2)
+      coreDustMaterialRef.current.uniforms.uSecondary.value.copy(accentColor).lerp(secondaryColor, 0.34)
+      coreDustMaterialRef.current.uniforms.uOpacity.value =
+        (0.34 + intensity * 0.7) * intensity * silhouetteProfile.core * (reducedMotion ? 0.85 : 1)
     }
 
     if (accentPrimaryMaterialRef.current) {
@@ -1732,7 +1871,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
     <group ref={groupRef} position={project.coordinates}>
       <mesh
         ref={shellOcclusionRef}
-        renderOrder={-41}
+        renderOrder={-11}
         frustumCulled={false}
         rotation={
           style.kind === 'pulse'
@@ -1743,15 +1882,9 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
         <icosahedronGeometry args={[style.shellScale, 1]} />
         <meshBasicMaterial
           colorWrite={false}
-          depthWrite={false}
-          depthTest={false}
-          side={THREE.DoubleSide}
-          stencilWrite
-          stencilRef={1}
-          stencilFunc={THREE.AlwaysStencilFunc}
-          stencilFail={THREE.KeepStencilOp}
-          stencilZFail={THREE.KeepStencilOp}
-          stencilZPass={THREE.ReplaceStencilOp}
+          depthWrite
+          depthTest
+          side={THREE.FrontSide}
           toneMapped={false}
         />
       </mesh>
@@ -1943,7 +2076,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
         />
       </mesh>
 
-      <mesh ref={coreRef}>
+      <mesh ref={coreRef} renderOrder={-12} visible={false}>
         <HeroCoreGeometry kind={style.kind} />
         <shaderMaterial
           ref={coreMaterialRef}
@@ -1951,8 +2084,8 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
           vertexShader={CORE_VERTEX_SHADER}
           fragmentShader={CORE_FRAGMENT_SHADER}
           transparent
-          depthTest
-          depthWrite
+          depthTest={false}
+          depthWrite={false}
           blending={THREE.NormalBlending}
           toneMapped={false}
         />
@@ -1960,6 +2093,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
 
       <mesh
         ref={shellRef}
+        renderOrder={-12}
         rotation={
           style.kind === 'pulse'
             ? [Math.PI / 4, Math.PI / 3, 0]
@@ -2098,53 +2232,35 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
         </group>
       )}
 
-      <instancedMesh
-        ref={dustMeshRef}
-        args={[undefined, undefined, dustParticles.count]}
-        renderOrder={-10}
-        frustumCulled={false}
-        visible={false}
-      >
-        <planeGeometry args={[1, 1]} />
-        <meshBasicMaterial
-          ref={dustMaterialRef}
-          map={dustTexture}
-          color={style.secondary}
-          transparent
-          opacity={0.2}
-          alphaTest={0.002}
-          depthTest
-          depthWrite={false}
-          stencilWrite
-          stencilRef={1}
-          stencilFunc={THREE.NotEqualStencilFunc}
-          stencilFail={THREE.KeepStencilOp}
-          stencilZFail={THREE.KeepStencilOp}
-          stencilZPass={THREE.KeepStencilOp}
-          blending={THREE.NormalBlending}
-          side={THREE.DoubleSide}
-          toneMapped={false}
-        />
-      </instancedMesh>
+      <group ref={coreDustGroupRef}>
+        <mesh renderOrder={-13} frustumCulled={false}>
+          <icosahedronGeometry args={[coreDustRadius, 7]} />
+          <shaderMaterial
+            ref={coreDustMaterialRef}
+            uniforms={coreDustUniforms}
+            vertexShader={CORE_DUST_VERTEX_SHADER}
+            fragmentShader={CORE_DUST_FRAGMENT_SHADER}
+            transparent
+            depthTest={false}
+            depthWrite={false}
+            blending={THREE.AdditiveBlending}
+            side={THREE.DoubleSide}
+            toneMapped={false}
+          />
+        </mesh>
+      </group>
 
-      <mesh ref={streamRibbonRef} geometry={flowRibbons.geometry} renderOrder={-9} frustumCulled={false}>
+      <mesh ref={streamRibbonRef} geometry={etherealFilaments.geometry} renderOrder={-9} frustumCulled={false}>
         <shaderMaterial
           ref={streamRibbonMaterialRef}
           uniforms={streamRibbonUniforms}
-          vertexShader={LIQUID_RIBBON_VERTEX_SHADER}
-          fragmentShader={LIQUID_RIBBON_FRAGMENT_SHADER}
+          vertexShader={ETHEREAL_FILAMENT_VERTEX_SHADER}
+          fragmentShader={ETHEREAL_FILAMENT_FRAGMENT_SHADER}
           transparent
           depthTest
           depthWrite={false}
-          stencilWrite
-          stencilRef={1}
-          stencilFunc={THREE.NotEqualStencilFunc}
-          stencilFail={THREE.KeepStencilOp}
-          stencilZFail={THREE.KeepStencilOp}
-          stencilZPass={THREE.KeepStencilOp}
-          blending={THREE.NormalBlending}
-          side={THREE.DoubleSide}
-          forceSinglePass
+          blending={THREE.AdditiveBlending}
+          side={THREE.FrontSide}
           toneMapped={false}
         />
       </mesh>
@@ -2163,12 +2279,6 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
           transparent
           depthTest
           depthWrite={false}
-          stencilWrite
-          stencilRef={1}
-          stencilFunc={THREE.NotEqualStencilFunc}
-          stencilFail={THREE.KeepStencilOp}
-          stencilZFail={THREE.KeepStencilOp}
-          stencilZPass={THREE.KeepStencilOp}
           blending={THREE.AdditiveBlending}
           toneMapped={false}
         />
@@ -3489,7 +3599,7 @@ export function ConstellationScene(props: ConstellationSceneProps) {
       gl={{ antialias: true, alpha: false, stencil: true, powerPreference: 'high-performance' }}
       onCreated={({ gl }) => {
         gl.toneMapping = THREE.ACESFilmicToneMapping
-        gl.toneMappingExposure = 1.0
+        gl.toneMappingExposure = 1.5
       }}
       fallback={<div className="canvas-fallback">WebGL unavailable.</div>}
     >
