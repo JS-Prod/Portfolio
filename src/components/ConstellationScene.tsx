@@ -1,6 +1,6 @@
-import { Html, OrbitControls } from '@react-three/drei'
+import { Html, OrbitControls, Preload } from '@react-three/drei'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import * as THREE from 'three'
 import {
@@ -60,7 +60,8 @@ type ProjectNodeProps = {
   mapVisibility: number
   nodeDisplayMode: 'neutral' | 'background'
   neutralBlendOverride: number | null
-  introReveal: number
+  introRevealRef: RefObject<number>
+  introRevealOffset: number
   reducedMotion: boolean
   onHover: (projectId: string | null) => void
   onSelect: (projectId: string | null) => void
@@ -74,6 +75,18 @@ type CameraRigProps = {
   onTransitionHalfway?: () => void
   onTransitionProgress?: (progress: number) => void
 }
+
+type IntroConnectionSegmentProps = {
+  connection: ConnectionVisual
+  connectionIndex: number
+  lineColor: string
+  lineBaseOpacity: number
+  introRevealActive: boolean
+  introRevealProgressRef: RefObject<number>
+  reverseTracer: boolean
+}
+
+type CameraTransitionMode = 'neutral-intro' | 'neutral-to-focus' | 'focus-to-neutral' | 'focus-to-focus'
 
 type HeroKind = 'storm' | 'harmonic' | 'pulse'
 
@@ -171,6 +184,7 @@ const CONNECTION_DISTANCE = 6.2
 const WORLD_UP = new THREE.Vector3(0, 1, 0)
 const X_AXIS = new THREE.Vector3(1, 0, 0)
 const WHITE = new THREE.Color('#ffffff')
+const BLACK = new THREE.Color('#000000')
 const CORE_VERTEX_SHADER = `
 varying vec3 vNormal;
 varying vec3 vWorldPos;
@@ -784,6 +798,22 @@ function easeInOutSine(value: number) {
   return -(Math.cos(Math.PI * value) - 1) / 2
 }
 
+function getCameraTransitionDuration(mode: CameraTransitionMode, viewportWidth: number, reducedMotion: boolean) {
+  if (reducedMotion) {
+    return 0.01
+  }
+
+  if (mode === 'neutral-intro') {
+    return viewportWidth < 900 ? 1.6 : 1.8
+  }
+
+  if (mode === 'neutral-to-focus' || mode === 'focus-to-neutral') {
+    return viewportWidth < 900 ? 1.52 : 1.84
+  }
+
+  return viewportWidth < 900 ? 1.75 : 2.35
+}
+
 function buildConnections(projects: Project[]): Connection[] {
   const connections: Connection[] = []
 
@@ -859,7 +889,7 @@ function HeroCoreGeometry({ kind }: { kind: HeroKind }) {
 
 const ETHEREAL_FILAMENT_PRESETS: Record<HeroKind, EtherealFilamentConfig> = {
   storm: {
-    filamentCount: 6,
+    filamentCount: 8,
     trailLength: 56,
     orbitStrength: 3.1,
     windStrength: 2.2,
@@ -873,7 +903,7 @@ const ETHEREAL_FILAMENT_PRESETS: Record<HeroKind, EtherealFilamentConfig> = {
     crossSectionSegments: 14,
   },
   harmonic: {
-    filamentCount: 6,
+    filamentCount: 8,
     trailLength: 62,
     orbitStrength: 2.7,
     windStrength: 1.8,
@@ -887,7 +917,7 @@ const ETHEREAL_FILAMENT_PRESETS: Record<HeroKind, EtherealFilamentConfig> = {
     crossSectionSegments: 14,
   },
   pulse: {
-    filamentCount: 6,
+    filamentCount: 8,
     trailLength: 54,
     orbitStrength: 2.9,
     windStrength: 1.95,
@@ -1579,13 +1609,16 @@ function ProjectNode({
   mapVisibility,
   nodeDisplayMode,
   neutralBlendOverride,
-  introReveal,
+  introRevealRef,
+  introRevealOffset,
   reducedMotion,
   onHover,
   onSelect,
 }: ProjectNodeProps) {
   const isNeutralNode = nodeDisplayMode === 'neutral'
-  const introVisibilityStatic = clamp01(introReveal)
+  const introVisibilityStatic = isNeutralNode
+    ? smoothstep(0, 1, clamp01((clamp01(introRevealRef.current) - introRevealOffset) / 0.34))
+    : 1
   const neutralNeedsTransparency = !isNeutralNode || neutralBlendOverride !== null || introVisibilityStatic < 0.999
   const groupRef = useRef<THREE.Group>(null)
   const ringRef = useRef<THREE.Mesh>(null)
@@ -1596,8 +1629,28 @@ function ProjectNode({
   const scaleTargetRef = useMemo(() => new THREE.Vector3(1, 1, 1), [])
   const neutralBlendRef = useRef(nodeDisplayMode === 'neutral' ? 1 : 0)
   const phaseOffset = useMemo(() => (getHash(project.id) % 628) / 100, [project.id])
+  const neutralLumaCompensation = useMemo(() => {
+    const color = new THREE.Color(project.color)
+    const luminance = color.r * 0.2126 + color.g * 0.7152 + color.b * 0.0722
+    const compensation = 0.82 / Math.max(0.001, luminance)
+    return THREE.MathUtils.clamp(compensation, 0.88, 1.06)
+  }, [project.color])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    if (!groupRef.current) {
+      return
+    }
+
+    if (isNeutralNode) {
+      const introVisibility = smoothstep(0, 1, clamp01((clamp01(introRevealRef.current) - introRevealOffset) / 0.34))
+      groupRef.current.scale.setScalar(Math.max(0.0001, introVisibility))
+      return
+    }
+
+    groupRef.current.scale.setScalar(1)
+  }, [introRevealOffset, introRevealRef, isNeutralNode])
+
+  useLayoutEffect(() => {
     return () => {
       document.body.style.cursor = 'default'
     }
@@ -1620,7 +1673,9 @@ function ProjectNode({
     neutralBlendRef.current = THREE.MathUtils.lerp(neutralBlendRef.current, isActive ? 0 : neutralTarget, neutralBlendLerp)
     const neutralBlend = neutralBlendRef.current
     const neutralModeOpacity = neutralBlendOverride === null ? 1 : neutralBlend
-    const introVisibility = clamp01(introReveal)
+    const introVisibility = isNeutralNode
+      ? smoothstep(0, 1, clamp01((clamp01(introRevealRef.current) - introRevealOffset) / 0.34))
+      : 1
     const introFlash = Math.exp(-Math.pow(introVisibility - 0.72, 2) / 0.014)
     const pulseAmplitude = THREE.MathUtils.lerp(0.024, 0.048, neutralBlend)
     const pulse = reducedMotion ? 0 : Math.sin(elapsed * 2 + phaseOffset) * pulseAmplitude
@@ -1652,24 +1707,40 @@ function ProjectNode({
       const baseEmissive = isHovered ? 0.42 : 0.3
       const neutralEmissiveBoost = isHovered ? 0.32 : 0.24
 
+      if (isNeutralNode) {
+        // Neutral nodes should not catch scene lighting differently by position.
+        nodeMaterialRef.current.color.copy(BLACK)
+        nodeMaterialRef.current.emissive.set(project.color)
+        nodeMaterialRef.current.roughness = 1
+        nodeMaterialRef.current.metalness = 0
+      } else {
+        nodeMaterialRef.current.color.set(project.color)
+        nodeMaterialRef.current.emissive.set(project.color)
+        nodeMaterialRef.current.roughness = 0.3
+        nodeMaterialRef.current.metalness = 0.2
+      }
+
       nodeMaterialRef.current.opacity = isNeutralNode
         ? neutralModeOpacity * introVisibility
         : mapVisibility * (baseOpacity + neutralBlend * neutralOpacityBoost)
-      nodeMaterialRef.current.emissiveIntensity = mapVisibility * (baseEmissive + neutralBlend * neutralEmissiveBoost) * (isNeutralNode ? (0.24 + introVisibility * 0.76 + introFlash * 0.28) : 1)
+      nodeMaterialRef.current.emissiveIntensity =
+        mapVisibility *
+        (baseEmissive + neutralBlend * neutralEmissiveBoost) *
+        (isNeutralNode ? (0.24 + introVisibility * 0.76) * neutralLumaCompensation : 1)
     }
 
     if (ringMaterialRef.current) {
       const baseRingOpacity = isHovered ? 0.22 : 0.13
       const neutralRingBoost = isHovered ? 0.34 : 0.3
       ringMaterialRef.current.opacity = isNeutralNode
-        ? neutralModeOpacity * introVisibility * (0.88 + introFlash * 0.24)
+        ? neutralModeOpacity * introVisibility * 0.88 * neutralLumaCompensation
         : mapVisibility * (baseRingOpacity + neutralBlend * neutralRingBoost)
     }
 
     if (outerRingMaterialRef.current) {
       const outerOpacity = isHovered ? 0.28 : 0.18
       outerRingMaterialRef.current.opacity = isNeutralNode
-        ? neutralModeOpacity * introVisibility * (0.82 + introFlash * 0.22)
+        ? neutralModeOpacity * introVisibility * 0.82 * neutralLumaCompensation
         : mapVisibility * outerOpacity * neutralBlend
     }
   })
@@ -1677,7 +1748,7 @@ function ProjectNode({
   const neutralModeOpacity = neutralBlendOverride === null ? 1 : neutralBlendOverride
 
   return (
-    <group ref={groupRef} scale={isNeutralNode ? Math.max(0.0001, introVisibilityStatic) : 1}>
+    <group ref={groupRef}>
       {!isActive && (
         <>
           <mesh ref={ringRef} renderOrder={-20}>
@@ -1686,7 +1757,7 @@ function ProjectNode({
               ref={ringMaterialRef}
               color={project.color}
               transparent={neutralNeedsTransparency}
-              opacity={isNeutralNode ? neutralModeOpacity * introVisibilityStatic : 0.28}
+              opacity={isNeutralNode ? neutralModeOpacity * introVisibilityStatic * 0.88 * neutralLumaCompensation : 0.28}
               depthWrite
               depthTest
               blending={isNeutralNode ? THREE.NormalBlending : THREE.AdditiveBlending}
@@ -1700,7 +1771,7 @@ function ProjectNode({
               ref={outerRingMaterialRef}
               color={project.color}
               transparent={neutralNeedsTransparency}
-              opacity={isNeutralNode ? neutralModeOpacity * introVisibilityStatic : 0.22}
+              opacity={isNeutralNode ? neutralModeOpacity * introVisibilityStatic * 0.82 * neutralLumaCompensation : 0.22}
               depthWrite
               depthTest
               blending={isNeutralNode ? THREE.NormalBlending : THREE.AdditiveBlending}
@@ -1709,7 +1780,7 @@ function ProjectNode({
           </mesh>
 
           <mesh
-            renderOrder={-18}
+            renderOrder={-19}
             onPointerOver={(event) => {
               event.stopPropagation()
               document.body.style.cursor = 'pointer'
@@ -1725,13 +1796,25 @@ function ProjectNode({
               onSelect(project.id)
             }}
           >
+            <sphereGeometry args={[0.44, 12, 12]} />
+            <meshBasicMaterial
+              transparent
+              opacity={0}
+              colorWrite={false}
+              depthWrite={false}
+              depthTest={false}
+              toneMapped={false}
+            />
+          </mesh>
+
+          <mesh renderOrder={-18}>
             <icosahedronGeometry args={[0.27, 1]} />
             <meshStandardMaterial
               ref={nodeMaterialRef}
-              color={project.color}
+              color={isNeutralNode ? BLACK : project.color}
               emissive={project.color}
-              roughness={0.3}
-              metalness={0.2}
+              roughness={isNeutralNode ? 1 : 0.3}
+              metalness={isNeutralNode ? 0 : 0.2}
               transparent={neutralNeedsTransparency}
               opacity={isNeutralNode ? neutralModeOpacity * introVisibilityStatic : 0.62}
               depthWrite
@@ -1810,6 +1893,9 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
     progress: 0,
     speed: 0.9,
   })
+  const simulationWarmupStepsRef = useRef(reducedMotion ? 4 : 12)
+  const simulationWarmupTimeRef = useRef(0)
+  const simulationWarmupDoneRef = useRef(false)
 
   const style = useMemo(() => getHeroStyle(project), [project])
   const showCoreDust = !collapseParticlesOnFadeOut
@@ -1830,7 +1916,10 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
 
     return { core: 1.0, shell: 0.8, ringsPrimary: 1.08, ringsSecondary: 1.0, particles: 1.22 }
   }, [style.kind])
-  const coreDustRadius = useMemo(() => style.shellScale * coreDustProfile.radiusScale, [coreDustProfile.radiusScale, style.shellScale])
+  const coreDustRadius = useMemo(
+    () => style.shellScale * Math.min(coreDustProfile.radiusScale, 1),
+    [coreDustProfile.radiusScale, style.shellScale],
+  )
   const coreDustUniforms = useMemo(
     () => ({
       uTime: { value: 0 },
@@ -1865,6 +1954,40 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
     return { primary: 0.22, secondary: 0.2 }
   }, [style.kind])
 
+  useLayoutEffect(() => {
+    const initialIntensity = clamp01(presenceRef.current)
+    const isVisible = initialIntensity > 0.008
+    const maskVisible = initialIntensity > 0.05
+
+    if (groupRef.current) {
+      groupRef.current.visible = isVisible
+    }
+
+    if (shellMaskRef.current) {
+      shellMaskRef.current.visible = maskVisible
+    }
+
+    if (shellOcclusionRef.current) {
+      shellOcclusionRef.current.visible = maskVisible
+    }
+
+    if (shellAccentMaskRef.current) {
+      shellAccentMaskRef.current.visible = maskVisible
+    }
+
+    if (coreMaskRef.current) {
+      coreMaskRef.current.visible = maskVisible
+    }
+
+    if (shellStarBlockerRef.current) {
+      shellStarBlockerRef.current.visible = maskVisible
+    }
+
+    if (coreStarBlockerRef.current) {
+      coreStarBlockerRef.current.visible = maskVisible
+    }
+  }, [])
+
   useEffect(
     () => () => {
       etherealFilaments.geometry.dispose()
@@ -1872,7 +1995,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
     [etherealFilaments],
   )
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     coreDustWindRandomRef.current = createRandom(getHash(`${project.id}-core-dust-wind`) + 341)
     coreDustNextRetargetRef.current = 0
     coreDustStepBudgetRef.current = reducedMotion ? 12 : 16
@@ -1882,7 +2005,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
     coreDustWindSecondaryTargetWorldRef.set(0, 0, 1)
   }, [project.id, reducedMotion])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const random = createRandom(getHash(`${project.id}-wire-trace`) + 97)
     traceRandomRef.current = random
 
@@ -1901,6 +2024,12 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       speed: style.kind === 'harmonic' ? 0.68 : style.kind === 'pulse' ? 0.76 : 0.72,
     }
   }, [project.id, style.kind, wireTraceGraph])
+
+  useLayoutEffect(() => {
+    simulationWarmupStepsRef.current = reducedMotion ? 4 : 12
+    simulationWarmupTimeRef.current = 0
+    simulationWarmupDoneRef.current = false
+  }, [project.id, reducedMotion])
 
   const coreUniforms = useMemo(
     () => ({
@@ -1982,6 +2111,26 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       coreStarBlockerRef.current.visible = maskVisible
     }
 
+    if (!simulationWarmupDoneRef.current && simulationWarmupStepsRef.current > 0) {
+      const warmupBatch = Math.min(simulationWarmupStepsRef.current, reducedMotion ? 1 : 2)
+      const warmupDelta = 1 / 90
+      const warmupIntensity = reducedMotion ? 0.2 : 0.34
+
+      for (let step = 0; step < warmupBatch; step += 1) {
+        simulationWarmupTimeRef.current += warmupDelta
+        const warmupElapsed = simulationWarmupTimeRef.current
+        updateParticleField(streamParticles, style, warmupElapsed * 0.5, warmupDelta, warmupIntensity, false)
+        updateEtherealFilamentSimulation(etherealFilaments, warmupElapsed, warmupDelta, 1, reducedMotion)
+        updateEtherealFilamentGeometry(etherealFilaments)
+      }
+
+      simulationWarmupStepsRef.current -= warmupBatch
+
+      if (simulationWarmupStepsRef.current <= 0) {
+        simulationWarmupDoneRef.current = true
+      }
+    }
+
     if (!isVisible) {
       return
     }
@@ -2022,9 +2171,9 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       const cloudPulse =
         1 +
         Math.sin(elapsed * 0.52 + (style.kind === 'harmonic' ? 0.8 : style.kind === 'pulse' ? 1.4 : 0.2)) *
-          0.035 *
+          0.02 *
           intensity
-      coreDustGroupRef.current.scale.setScalar(cloudPulse)
+      coreDustGroupRef.current.scale.setScalar(Math.min(cloudPulse, 1))
     }
 
     if (shellAccentRef.current) {
@@ -2668,6 +2817,12 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
             depthWrite={false}
             blending={THREE.AdditiveBlending}
             side={THREE.BackSide}
+            stencilWrite
+            stencilRef={1}
+            stencilFunc={THREE.EqualStencilFunc}
+            stencilFail={THREE.KeepStencilOp}
+            stencilZFail={THREE.KeepStencilOp}
+            stencilZPass={THREE.KeepStencilOp}
             toneMapped={false}
           />
         </mesh>
@@ -2718,7 +2873,7 @@ function CinematicBloom({ project, reducedMotion }: CinematicBloomProps) {
   const vignetteRef = useRef<ShaderPass | null>(null)
   const filmRef = useRef<FilmPass | null>(null)
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const renderPass = new RenderPass(scene, camera)
     const bloomPass = new UnrealBloomPass(new THREE.Vector2(size.width, size.height), 0.66, 0.5, 0.41)
     const rgbShiftPass = new ShaderPass(RGBShiftShader)
@@ -2769,7 +2924,7 @@ function CinematicBloom({ project, reducedMotion }: CinematicBloomProps) {
     }
   }, [camera, gl, scene, size.height, size.width])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const bloomPass = bloomRef.current
     const rgbShiftPass = rgbShiftRef.current
     const vignettePass = vignetteRef.current
@@ -2784,12 +2939,12 @@ function CinematicBloom({ project, reducedMotion }: CinematicBloomProps) {
     const filmUniforms = filmPass.uniforms as Record<string, THREE.IUniform<number>>
 
     if (!project) {
-      bloomPass.strength = reducedMotion ? 0.4 : 0.48
-      bloomPass.radius = 0.46
-      bloomPass.threshold = 0.5
+      bloomPass.strength = reducedMotion ? 0.46 : 0.58
+      bloomPass.radius = 0.44
+      bloomPass.threshold = 0.46
       rgbUniforms.amount.value = 0.00008
-      vignetteUniforms.darkness.value = 1.06
-      filmUniforms.nIntensity.value = reducedMotion ? 0.001 : 0.003
+      vignetteUniforms.darkness.value = 0.9
+      filmUniforms.nIntensity.value = reducedMotion ? 0.0006 : 0.0016
     } else if (project.id === 'gpgpu-particles') {
       bloomPass.strength = reducedMotion ? 0.54 : 0.68
       bloomPass.radius = 0.56
@@ -2829,7 +2984,11 @@ function CinematicBloom({ project, reducedMotion }: CinematicBloomProps) {
       vignetteUniforms.offset.value = 1.03 + Math.sin(elapsed * 0.06) * 0.015
     }
 
-    composerRef.current?.render(delta)
+    if (composerRef.current) {
+      composerRef.current.render(delta)
+    } else {
+      gl.render(scene, camera)
+    }
   }, 1)
 
   return null
@@ -2865,12 +3024,12 @@ function CameraRig({
   const orbitTargetOffsetRef = useRef(new THREE.Vector3())
 
   const progressRef = useRef(1)
+  const transitionStartTimeRef = useRef(0)
+  const transitionDurationRef = useRef(0.01)
   const isTransitioningRef = useRef(true)
   const isInitialNeutralTransitionRef = useRef(false)
   const hasInitializedRef = useRef(false)
-  const transitionModeRef = useRef<'neutral-intro' | 'neutral-to-focus' | 'focus-to-neutral' | 'focus-to-focus'>(
-    'focus-to-focus',
-  )
+  const transitionModeRef = useRef<CameraTransitionMode>('focus-to-focus')
   const previousActiveProjectIdRef = useRef<string | null>(activeProject?.id ?? null)
   const isUserInteractingRef = useRef(false)
   const halfwayNotifiedRef = useRef(false)
@@ -2904,7 +3063,7 @@ function CameraRig({
     }
   }, [controlsRef])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const controls = controlsRef.current
 
     if (projects.length === 0) {
@@ -3076,9 +3235,9 @@ function CameraRig({
       introSide.normalize()
       introSwayAxisRef.current.copy(introSide)
 
-      const introDistance = size.width < 900 ? 1.6 : 2.2
-      const introSideOffset = size.width < 900 ? -0.22 : -0.36
-      const introLift = size.width < 900 ? 0.24 : 0.34
+      const introDistance = size.width < 900 ? 1.9 : 2.6
+      const introSideOffset = size.width < 900 ? -0.26 : -0.44
+      const introLift = size.width < 900 ? 0.3 : 0.44
 
       startCameraRef.current
         .copy(cameraPosition)
@@ -3129,7 +3288,17 @@ function CameraRig({
     startOffsetDirectionRef.current.copy(startOffset.normalize())
     endOffsetDirectionRef.current.copy(endOffset.normalize())
 
+    camera.position.copy(startCameraRef.current)
+    if (controls) {
+      controls.target.copy(startTargetRef.current)
+      controls.update()
+    }
+    camera.lookAt(startTargetRef.current)
+    camera.updateMatrixWorld()
+
     progressRef.current = 0
+    transitionDurationRef.current = getCameraTransitionDuration(transitionModeRef.current, size.width, reducedMotion)
+    transitionStartTimeRef.current = performance.now() * 0.001
     isTransitioningRef.current = true
     isUserInteractingRef.current = false
     halfwayNotifiedRef.current = false
@@ -3181,26 +3350,10 @@ function CameraRig({
     controls.enabled = false
     controls.enableDamping = false
 
-    const frameDelta = reducedMotion ? delta : Math.min(delta, 1 / 30)
     const transitionMode = transitionModeRef.current
-    const duration = reducedMotion
-      ? 0.01
-      : transitionMode === 'neutral-intro'
-        ? size.width < 900
-          ? 2.0
-          : 2.25
-        : transitionMode === 'neutral-to-focus'
-          ? size.width < 900
-            ? 1.46
-            : 1.72
-          : transitionMode === 'focus-to-neutral'
-            ? size.width < 900
-              ? 1.52
-              : 1.84
-        : size.width < 900
-          ? 1.75
-          : 2.35
-    const nextProgress = Math.min(1, progressRef.current + frameDelta / duration)
+    const transitionDuration = Math.max(0.01, transitionDurationRef.current)
+    const elapsed = Math.max(0, performance.now() * 0.001 - transitionStartTimeRef.current)
+    const nextProgress = Math.min(1, elapsed / transitionDuration)
     progressRef.current = nextProgress
     onTransitionProgress?.(nextProgress)
 
@@ -3219,12 +3372,12 @@ function CameraRig({
     const arcLift = reducedMotion
       ? 0
       : transitionMode === 'neutral-intro'
-        ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.04 : 0.08)
+        ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.075 : 0.15)
         : transitionMode === 'neutral-to-focus'
-          ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.06 : 0.15)
+          ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.085 : 0.21)
           : transitionMode === 'focus-to-neutral'
             ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.06 : 0.15)
-        : Math.sin(Math.PI * eased) * (size.width < 900 ? 0.08 : 0.24)
+        : Math.sin(Math.PI * eased) * (size.width < 900 ? 0.1 : 0.3)
 
     transitionTargetRef.current.lerpVectors(startTargetRef.current, endTargetRef.current, eased)
     controls.target.copy(transitionTargetRef.current)
@@ -3257,16 +3410,16 @@ function CameraRig({
     const cinematicDolly = reducedMotion
       ? 0
       : transitionMode === 'neutral-intro'
-        ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.08 : 0.14)
+        ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.18 : 0.32)
         : transitionMode === 'neutral-to-focus'
-          ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.28 : 0.64)
+          ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.36 : 0.82)
           : transitionMode === 'focus-to-neutral'
             ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.28 : 0.64)
-        : Math.sin(Math.PI * eased) * (size.width < 900 ? 0.44 : 0.94)
+        : Math.sin(Math.PI * eased) * (size.width < 900 ? 0.54 : 1.14)
 
     camera.position.copy(transitionTargetRef.current).addScaledVector(transitionDirectionRef.current, radius + cinematicDolly)
     if (transitionMode === 'neutral-intro') {
-      const introSway = Math.sin(Math.PI * eased) * (size.width < 900 ? 0.035 : 0.055)
+      const introSway = (1 - eased) * (size.width < 900 ? -0.022 : -0.036)
       camera.position.addScaledVector(introSwayAxisRef.current, introSway)
     }
     camera.position.addScaledVector(WORLD_UP, arcLift)
@@ -3414,15 +3567,15 @@ function NeutralStarField({ reducedMotion }: { reducedMotion: boolean }) {
   const scratchObject = useMemo(() => new THREE.Object3D(), [])
 
   const neutralBaseStars = useMemo(
-    () => createNeutralStarInstances('neutral-stars-base', 1842, 122, 28, [0.026, 0.062]),
+    () => createNeutralStarInstances('neutral-stars-base', 2200, 122, 28, [0.026, 0.062]),
     [],
   )
   const neutralMidStars = useMemo(
-    () => createNeutralStarInstances('neutral-stars-mid', 1120, 108, 22, [0.022, 0.052]),
+    () => createNeutralStarInstances('neutral-stars-mid', 1340, 108, 22, [0.022, 0.052]),
     [],
   )
   const neutralOverlayStars = useMemo(
-    () => createNeutralStarInstances('neutral-stars-overlay', 744, 94, 18, [0.038, 0.085]),
+    () => createNeutralStarInstances('neutral-stars-overlay', 890, 94, 18, [0.038, 0.085]),
     [],
   )
   const nebulaNearUniforms = useMemo(
@@ -3623,16 +3776,148 @@ function NeutralStarField({ reducedMotion }: { reducedMotion: boolean }) {
   )
 }
 
+function IntroConnectionSegment({
+  connection,
+  connectionIndex,
+  lineColor,
+  lineBaseOpacity,
+  introRevealActive,
+  introRevealProgressRef,
+  reverseTracer,
+}: IntroConnectionSegmentProps) {
+  const lineMeshRef = useRef<THREE.Mesh>(null)
+  const lineMaterialRef = useRef<THREE.MeshBasicMaterial>(null)
+  const tracerMeshRef = useRef<THREE.Mesh>(null)
+  const tracerMaterialRef = useRef<THREE.MeshBasicMaterial>(null)
+  const lineCenterRef = useMemo(() => new THREE.Vector3(), [])
+  const tracerCenterRef = useMemo(() => new THREE.Vector3(), [])
+
+  const start = useMemo(
+    () => new THREE.Vector3(connection.points[0][0], connection.points[0][1], connection.points[0][2]),
+    [connection.points],
+  )
+  const direction = useMemo(
+    () =>
+      new THREE.Vector3(
+        connection.points[1][0] - connection.points[0][0],
+        connection.points[1][1] - connection.points[0][1],
+        connection.points[1][2] - connection.points[0][2],
+      ).normalize(),
+    [connection.points],
+  )
+  const midpoint = useMemo(
+    () => new THREE.Vector3(connection.midpoint[0], connection.midpoint[1], connection.midpoint[2]),
+    [connection.midpoint],
+  )
+
+  useEffect(() => {
+    if (lineMaterialRef.current) {
+      lineMaterialRef.current.color.set(lineColor)
+    }
+  }, [lineColor])
+
+  useFrame(() => {
+    const lineMesh = lineMeshRef.current
+    const tracerMesh = tracerMeshRef.current
+    const lineMaterial = lineMaterialRef.current
+    const tracerMaterial = tracerMaterialRef.current
+
+    if (!lineMesh || !tracerMesh || !lineMaterial || !tracerMaterial) {
+      return
+    }
+
+    const introProgress = introRevealActive ? introRevealProgressRef.current : 1
+    const lineReveal = introRevealActive ? clamp01((introProgress - connectionIndex * 0.045) / 0.42) : 1
+    const renderedLength = Math.max(0.001, connection.length * lineReveal)
+
+    if (introRevealActive) {
+      const lineCenterDistance = reverseTracer ? connection.length - renderedLength * 0.5 : renderedLength * 0.5
+      lineCenterRef.copy(start).addScaledVector(direction, lineCenterDistance)
+      lineMesh.position.copy(lineCenterRef)
+    } else {
+      lineMesh.position.copy(midpoint)
+    }
+
+    lineMesh.scale.set(1, renderedLength, 1)
+    lineMaterial.opacity = lineBaseOpacity * (introRevealActive ? lineReveal : 1)
+
+    if (!introRevealActive) {
+      tracerMesh.visible = false
+      return
+    }
+
+    const tracerProgressLinear = clamp01((introProgress - 0.08 - connectionIndex * 0.05) / 0.52)
+    const tracerDistance = THREE.MathUtils.lerp(0, connection.length, tracerProgressLinear)
+    const tracerMaxLength = Math.min(0.4, Math.max(0.14, connection.length * 0.14))
+    const halfMax = tracerMaxLength * 0.5
+    const halfBoundary = Math.max(0, Math.min(tracerDistance, connection.length - tracerDistance))
+    const tracerHalf = Math.min(halfMax, halfBoundary)
+
+    if (tracerHalf <= 0.0005) {
+      tracerMesh.visible = false
+      return
+    }
+
+    const tracerLength = Math.max(0.002, tracerHalf * 2)
+    const tracerCenterDistanceDirected = reverseTracer ? connection.length - tracerDistance : tracerDistance
+
+    tracerCenterRef.copy(start).addScaledVector(direction, tracerCenterDistanceDirected)
+    tracerMesh.visible = true
+    tracerMesh.position.copy(tracerCenterRef)
+    tracerMesh.scale.set(1, tracerLength, 1)
+    tracerMaterial.opacity = halfMax <= 0 ? 0 : 0.94 * smoothstep(0, 1, tracerHalf / halfMax)
+  })
+
+  return (
+    <group>
+      <mesh ref={lineMeshRef} position={connection.midpoint} quaternion={connection.quaternion} renderOrder={-20}>
+        <cylinderGeometry args={[0.012, 0.012, 1, 8, 1, true]} />
+        <meshBasicMaterial
+          ref={lineMaterialRef}
+          color={lineColor}
+          transparent
+          opacity={lineBaseOpacity}
+          depthWrite
+          depthTest
+          blending={THREE.NormalBlending}
+          toneMapped={false}
+        />
+      </mesh>
+
+      <mesh ref={tracerMeshRef} position={connection.midpoint} quaternion={connection.quaternion} renderOrder={-19} visible={false}>
+        <cylinderGeometry args={[0.018, 0.018, 1, 10, 1, true]} />
+        <meshBasicMaterial
+          ref={tracerMaterialRef}
+          color="#d9ecff"
+          transparent
+          opacity={0}
+          depthWrite={false}
+          depthTest
+          blending={THREE.AdditiveBlending}
+          toneMapped={false}
+        />
+      </mesh>
+    </group>
+  )
+}
+
 function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotion }: ConstellationSceneProps) {
+  const { gl, scene, camera } = useThree()
   const [hoveredProjectId, setHoveredProjectId] = useState<string | null>(null)
   const [visualActiveProjectId, setVisualActiveProjectId] = useState<string | null>(activeProjectId)
   const [outgoingHeroProjectId, setOutgoingHeroProjectId] = useState<string | null>(null)
   const [transitionProgress, setTransitionProgress] = useState(1)
-  const [initialRevealProgress, setInitialRevealProgress] = useState(reducedMotion ? 1 : 0)
+  const [introComplete, setIntroComplete] = useState(reducedMotion || activeProjectId !== null)
 
   const controlsRef = useRef<OrbitControlsImpl | null>(null)
+  const heroCompileGroupRef = useRef<THREE.Group>(null)
+  const hasCompiledHeroRef = useRef(false)
+  const heroCompileRequestedRef = useRef(false)
+  const heroWarmupTargetRef = useRef<THREE.WebGLRenderTarget | null>(null)
+  const outgoingHeroProjectIdRef = useRef<string | null>(outgoingHeroProjectId)
   const visualProjectIdRef = useRef<string | null>(activeProjectId)
   const initialRevealRef = useRef(reducedMotion ? 1 : 0)
+  const pendingNeutralSelectionRef = useRef<string | null>(null)
 
   const connections = useMemo(() => buildConnections(projects), [projects])
   const connectionVisuals = useMemo<ConnectionVisual[]>(
@@ -3655,6 +3940,24 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
       }),
     [connections],
   )
+  const topmostConnectionId = useMemo(() => {
+    if (connectionVisuals.length === 0) {
+      return null
+    }
+
+    let topmost = connectionVisuals[0]
+    let topY = topmost.midpoint[1]
+
+    for (let index = 1; index < connectionVisuals.length; index += 1) {
+      const candidate = connectionVisuals[index]
+      if (candidate.midpoint[1] > topY) {
+        topmost = candidate
+        topY = candidate.midpoint[1]
+      }
+    }
+
+    return topmost.id
+  }, [connectionVisuals])
 
   const activeProject = useMemo(
     () => (activeProjectId ? projects.find((project) => project.id === activeProjectId) ?? null : null),
@@ -3694,7 +3997,7 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
     const isInboundTransition = Boolean(transitionProgress < 0.999 && !outgoingHeroProjectId && visualActiveProjectId)
 
     if (isInboundTransition) {
-      return smoothstep(0.5, 0.9, transitionProgress)
+      return heroBlend
     }
 
     const isFocusSwap = Boolean(
@@ -3870,22 +4173,25 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
       tracerOpacity: 0.94 * fade * tracerEnvelope,
     }
   }, [focusSwapTracePath, isFocusToFocusTransition, transitionProgress])
-  const introRevealActive = useMemo(
-    () => !reducedMotion && !visualActiveProjectId && initialRevealProgress < 0.999,
-    [initialRevealProgress, reducedMotion, visualActiveProjectId],
-  )
+  const introRevealActive = !reducedMotion && !visualActiveProjectId && !introComplete
+  const shouldMountHeroWorlds = introComplete || visualActiveProjectId !== null || outgoingHeroProjectId !== null
 
   useFrame((_state, delta) => {
-    if (reducedMotion || visualActiveProjectId || initialRevealRef.current >= 1) {
+    if (!introRevealActive || initialRevealRef.current >= 1) {
       return
     }
 
-    const frameDelta = Math.min(delta, 1 / 30)
-    const duration = 2.2
+    const frameDelta = reducedMotion ? delta : Math.min(delta, 1 / 60)
+    const duration = 1.76
     const next = Math.min(1, initialRevealRef.current + frameDelta / duration)
     initialRevealRef.current = next
-    setInitialRevealProgress((previous) => (Math.abs(previous - next) > 0.002 ? next : previous))
-  })
+
+    if (next >= 1 && !introComplete) {
+      startTransition(() => {
+        setIntroComplete(true)
+      })
+    }
+  }, -2)
 
   useEffect(() => {
     const previousVisualId = visualProjectIdRef.current
@@ -3909,37 +4215,180 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
   }, [activeProjectId, reducedMotion])
 
   useEffect(() => {
+    outgoingHeroProjectIdRef.current = outgoingHeroProjectId
+  }, [outgoingHeroProjectId])
+
+  useEffect(() => {
     if (reducedMotion || visualActiveProjectId) {
       initialRevealRef.current = 1
-      setInitialRevealProgress(1)
+      setIntroComplete(true)
     }
   }, [reducedMotion, visualActiveProjectId])
 
   const handleTransitionProgress = useCallback((progress: number) => {
-    setTransitionProgress((previous) => {
-      if (progress === 0 || progress === 1) {
-        return progress
-      }
+    const isNeutralIntroProgress =
+      progress > 0 &&
+      progress < 1 &&
+      visualProjectIdRef.current === null &&
+      outgoingHeroProjectIdRef.current === null
 
-      return Math.abs(previous - progress) > (reducedMotion ? 0.05 : 0.01) ? progress : previous
-    })
-
-    if (progress >= 1) {
-      setOutgoingHeroProjectId(null)
+    if (isNeutralIntroProgress) {
+      return
     }
+
+    startTransition(() => {
+      setTransitionProgress((previous) => {
+        if (progress === 0 || progress === 1) {
+          return progress
+        }
+
+        return Math.abs(previous - progress) > (reducedMotion ? 0.05 : 0.01) ? progress : previous
+      })
+
+      if (progress >= 1) {
+        setOutgoingHeroProjectId(null)
+      }
+    })
   }, [reducedMotion])
 
   const handleNodeSelect = useCallback(
     (projectId: string | null) => {
       setHoveredProjectId(null)
+
+      if (
+        projectId &&
+        activeProjectId === null &&
+        !reducedMotion &&
+        !hasCompiledHeroRef.current
+      ) {
+        pendingNeutralSelectionRef.current = projectId
+        return
+      }
+
       onSelectProject(projectId)
     },
-    [onSelectProject],
+    [activeProjectId, onSelectProject, reducedMotion],
   )
 
   useEffect(() => {
     setHoveredProjectId(null)
   }, [activeProjectId])
+
+  useEffect(
+    () => () => {
+      heroWarmupTargetRef.current?.dispose()
+      heroWarmupTargetRef.current = null
+    },
+    [],
+  )
+
+  useFrame(() => {
+    if (hasCompiledHeroRef.current || heroCompileRequestedRef.current) {
+      return
+    }
+
+    const heroCompileGroup = heroCompileGroupRef.current
+
+    if (!heroCompileGroup) {
+      return
+    }
+
+    const canPrecompile =
+      reducedMotion ||
+      introComplete ||
+      (visualActiveProjectId !== null && transitionProgress >= 1)
+
+    if (!canPrecompile) {
+      return
+    }
+
+    heroCompileRequestedRef.current = true
+    const renderer = gl as THREE.WebGLRenderer
+    const visibilityStates: Array<[THREE.Object3D, boolean]> = []
+    heroCompileGroup.traverse((object) => {
+      visibilityStates.push([object, object.visible])
+      object.visible = true
+    })
+    const restoreVisibility = () => {
+      visibilityStates.forEach(([object, wasVisible]) => {
+        object.visible = wasVisible
+      })
+    }
+    const flushPendingSelection = () => {
+      const pendingSelection = pendingNeutralSelectionRef.current
+      if (!pendingSelection) {
+        return
+      }
+      pendingNeutralSelectionRef.current = null
+      onSelectProject(pendingSelection)
+    }
+    const renderWarmupFrame = () => {
+      let warmupTarget = heroWarmupTargetRef.current
+
+      if (!warmupTarget) {
+        warmupTarget = new THREE.WebGLRenderTarget(2, 2, {
+          depthBuffer: true,
+          stencilBuffer: true,
+        })
+        heroWarmupTargetRef.current = warmupTarget
+      }
+
+      const previousTarget = renderer.getRenderTarget()
+      const previousAutoClear = renderer.autoClear
+      const previousShadowAutoUpdate = renderer.shadowMap.autoUpdate
+      const previousXrEnabled = renderer.xr.enabled
+
+      try {
+        renderer.xr.enabled = false
+        renderer.autoClear = true
+        renderer.shadowMap.autoUpdate = false
+        renderer.setRenderTarget(warmupTarget)
+        renderer.clear(true, true, true)
+        renderer.render(scene, camera)
+      } finally {
+        renderer.setRenderTarget(previousTarget)
+        renderer.autoClear = previousAutoClear
+        renderer.shadowMap.autoUpdate = previousShadowAutoUpdate
+        renderer.xr.enabled = previousXrEnabled
+      }
+    }
+    const shouldCompileSynchronously =
+      introComplete &&
+      visualActiveProjectId === null &&
+      outgoingHeroProjectId === null &&
+      transitionProgress >= 1
+
+    if (shouldCompileSynchronously) {
+      try {
+        renderer.compile(heroCompileGroup, camera, scene)
+        renderWarmupFrame()
+      } catch {
+        // Ignore precompile failures and allow runtime compile as fallback.
+      } finally {
+        restoreVisibility()
+        hasCompiledHeroRef.current = true
+        flushPendingSelection()
+      }
+      return
+    }
+
+    void (async () => {
+      try {
+        if (typeof renderer.compileAsync === 'function') {
+          await renderer.compileAsync(heroCompileGroup, camera, scene)
+        } else {
+          renderer.compile(heroCompileGroup, camera, scene)
+        }
+        renderWarmupFrame()
+      } catch {
+        // Ignore precompile failures and allow runtime compile as fallback.
+      } finally {
+        restoreVisibility()
+        hasCompiledHeroRef.current = true
+        flushPendingSelection()
+      }
+    })()
+  }, -3)
 
   return (
     <>
@@ -3963,70 +4412,17 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
           return null
         }
 
-        const lineReveal = introRevealActive
-          ? smoothstep(0, 1, clamp01((initialRevealProgress - connectionIndex * 0.045) / 0.42))
-          : 1
-
-        const [sx, sy, sz] = connection.points[0]
-        const [ex, ey, ez] = connection.points[1]
-        const start = new THREE.Vector3(sx, sy, sz)
-        const end = new THREE.Vector3(ex, ey, ez)
-        const direction = end.sub(start).normalize()
-        const renderedLength = Math.max(0.001, connection.length * lineReveal)
-        let renderedMidpoint: Vector3 = connection.midpoint
-
-        if (introRevealActive) {
-          const center = start.clone().addScaledVector(direction, renderedLength * 0.5)
-          renderedMidpoint = [center.x, center.y, center.z]
-        }
-
-        const baseOpacity = visualActiveProjectId ? mapVisibility * 0.52 : 1
-        const lineOpacity = baseOpacity * (introRevealActive ? lineReveal : 1)
-
-        const tracerProgress = introRevealActive
-          ? clamp01((initialRevealProgress - 0.08 - connectionIndex * 0.05) / 0.52)
-          : 1
-        const tracerLength = Math.min(0.6, connection.length * 0.24)
-        const tracerOpacity = introRevealActive ? (1 - smoothstep(0.7, 1, tracerProgress)) * 0.92 : 0
-        const tracerStart = tracerLength * 0.5
-        const tracerEnd = Math.max(tracerStart, connection.length - tracerLength * 0.5)
-        const tracerDistance = THREE.MathUtils.lerp(tracerStart, tracerEnd, tracerProgress)
-        const tracerCenter = start.clone().addScaledVector(direction, tracerDistance)
-
         return (
-          <group key={connection.id}>
-            <mesh position={renderedMidpoint} quaternion={connection.quaternion} renderOrder={-20}>
-              <cylinderGeometry args={[0.012, 0.012, renderedLength, 8, 1, true]} />
-              <meshBasicMaterial
-                color={visualActiveProjectId ? activeConnectionColor : neutralConnectionColor}
-                transparent={Boolean(visualActiveProjectId) || lineOpacity < 0.999}
-                opacity={lineOpacity}
-                depthWrite
-                depthTest
-                blending={THREE.NormalBlending}
-                toneMapped={false}
-              />
-            </mesh>
-
-            {tracerOpacity > 0.004 && (
-              <mesh
-                position={[tracerCenter.x, tracerCenter.y, tracerCenter.z]}
-                quaternion={connection.quaternion}
-                renderOrder={-19}
-              >
-                <cylinderGeometry args={[0.018, 0.018, tracerLength, 10, 1, true]} />
-                <meshBasicMaterial
-                  color="#d9ecff"
-                  transparent
-                  opacity={tracerOpacity}
-                  depthWrite={false}
-                  depthTest
-                  blending={THREE.AdditiveBlending}
-                  toneMapped={false}
-                />
-              </mesh>
-            )}
-          </group>
+          <IntroConnectionSegment
+            key={connection.id}
+            connection={connection}
+            connectionIndex={connectionIndex}
+            lineColor={visualActiveProjectId ? activeConnectionColor : neutralConnectionColor}
+            lineBaseOpacity={visualActiveProjectId ? mapVisibility * 0.52 : 1}
+            introRevealActive={introRevealActive}
+            introRevealProgressRef={initialRevealRef}
+            reverseTracer={introRevealActive && connection.id === topmostConnectionId}
+          />
         )
       })}
 
@@ -4065,10 +4461,6 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
       )}
 
       {projects.map((project, projectIndex) => {
-        const nodeReveal = introRevealActive
-          ? smoothstep(0, 1, clamp01((initialRevealProgress - (0.43 + projectIndex * 0.15)) / 0.34))
-          : 1
-
         return (
         <ProjectNode
           key={project.id}
@@ -4078,7 +4470,8 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
           mapVisibility={mapVisibility}
           nodeDisplayMode={!visualActiveProjectId ? 'neutral' : 'background'}
           neutralBlendOverride={lowFiNeutralBlendOverride}
-          introReveal={nodeReveal}
+          introRevealRef={initialRevealRef}
+          introRevealOffset={0.43 + projectIndex * 0.15}
           reducedMotion={reducedMotion}
           onHover={setHoveredProjectId}
           onSelect={handleNodeSelect}
@@ -4086,24 +4479,24 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
         )
       })}
 
-      {outgoingHeroProject && outgoingHeroPresence > 0.004 && (
-        <HeroWorld
-          key={`hero-${outgoingHeroProject.id}`}
-          project={outgoingHeroProject}
-          reducedMotion={reducedMotion}
-          presenceTarget={outgoingHeroPresence}
-          collapseParticlesOnFadeOut
-        />
-      )}
+      {shouldMountHeroWorlds && (
+        <group ref={heroCompileGroupRef}>
+          {projects.map((project) => {
+            const isOutgoing = outgoingHeroProjectId === project.id && visualActiveProjectId !== project.id
+            const isIncoming = visualActiveProjectId === project.id
+            const presenceTarget = Math.max(isOutgoing ? outgoingHeroPresence : 0, isIncoming ? incomingHeroPresence : 0)
 
-      {visualActiveProject && incomingHeroPresence > 0.004 && (
-        <HeroWorld
-          key={`hero-${visualActiveProject.id}`}
-          project={visualActiveProject}
-          reducedMotion={reducedMotion}
-          presenceTarget={incomingHeroPresence}
-          collapseParticlesOnFadeOut={false}
-        />
+            return (
+              <HeroWorld
+                key={`hero-${project.id}`}
+                project={project}
+                reducedMotion={reducedMotion}
+                presenceTarget={presenceTarget}
+                collapseParticlesOnFadeOut={isOutgoing}
+              />
+            )
+          })}
+        </group>
       )}
 
       <mesh
@@ -4144,6 +4537,7 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
       />
 
       <CinematicBloom project={visualActiveProject} reducedMotion={reducedMotion} />
+      <Preload all />
     </>
   )
 }

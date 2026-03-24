@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 
 import type { Project } from '../data/projects'
@@ -8,6 +9,15 @@ type ProjectPanelProps = {
 
 export function ProjectPanel({ project }: ProjectPanelProps) {
   const reduceMotion = useReducedMotion() ?? false
+  const hasShownProjectRef = useRef(false)
+  const skipFirstProjectAnimation = !reduceMotion && project !== null && !hasShownProjectRef.current
+  const disableMotion = reduceMotion || skipFirstProjectAnimation
+
+  useEffect(() => {
+    if (project && !hasShownProjectRef.current) {
+      hasShownProjectRef.current = true
+    }
+  }, [project])
 
   return (
     <aside className="project-panel" aria-live="polite" aria-atomic="true">
@@ -17,10 +27,10 @@ export function ProjectPanel({ project }: ProjectPanelProps) {
         <motion.article
           key={project?.id ?? 'neutral'}
           className="project-card"
-          initial={reduceMotion ? false : { opacity: 0, y: 14 }}
-          animate={reduceMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
-          exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: -10 }}
-          transition={{ duration: reduceMotion ? 0.01 : 0.35, ease: [0.22, 1, 0.36, 1] }}
+          initial={disableMotion ? false : { opacity: 0, y: 14 }}
+          animate={disableMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+          exit={disableMotion ? { opacity: 0 } : { opacity: 0, y: -10 }}
+          transition={{ duration: disableMotion ? 0.01 : 0.35, ease: [0.22, 1, 0.36, 1] }}
         >
           {project ? (
             <>

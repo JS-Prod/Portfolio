@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useDeferredValue, useMemo, useState } from 'react'
 import { useReducedMotion } from 'framer-motion'
 
 import './App.css'
@@ -8,11 +8,20 @@ import { projects } from './data/projects'
 
 function App() {
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
+  const deferredActiveProjectId = useDeferredValue(activeProjectId)
   const reduceMotion = useReducedMotion() ?? false
+  const hasActiveProject = activeProjectId !== null
 
   const activeProject = useMemo(
     () => (activeProjectId ? projects.find((project) => project.id === activeProjectId) ?? null : null),
     [activeProjectId],
+  )
+  const deferredPanelProject = useMemo(
+    () =>
+      deferredActiveProjectId
+        ? projects.find((project) => project.id === deferredActiveProjectId) ?? null
+        : null,
+    [deferredActiveProjectId],
   )
 
   return (
@@ -33,20 +42,21 @@ function App() {
       </header>
 
       <main className="hud-panel">
-        <ProjectPanel project={activeProject} />
+        <ProjectPanel project={deferredPanelProject} />
       </main>
 
-      {activeProjectId && (
-        <button
-          type="button"
-          className="neutral-reset"
-          onClick={() => setActiveProjectId(null)}
-          aria-label="Return to neutral constellation view"
-          title="Return to neutral constellation view"
-        >
-          ↑
-        </button>
-      )}
+      <button
+        type="button"
+        className={`neutral-reset${hasActiveProject ? '' : ' is-hidden'}`}
+        onClick={() => setActiveProjectId(null)}
+        aria-label="Return to neutral constellation view"
+        title="Return to neutral constellation view"
+        aria-hidden={!hasActiveProject}
+        tabIndex={hasActiveProject ? 0 : -1}
+        disabled={!hasActiveProject}
+      >
+        ↑
+      </button>
 
       <nav className="project-rail" aria-label="Project constellation index">
         {projects.map((project) => {
