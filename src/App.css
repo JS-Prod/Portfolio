@@ -220,18 +220,24 @@
 
 .insight-panel {
   display: grid;
+  --insight-active-left: 0px;
+  --insight-active-width: 0px;
 }
 
 .insight-tabs {
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
+  flex-wrap: nowrap;
+  gap: 0;
   padding: 0 0.4rem;
-  margin-bottom: -1px;
+  margin-bottom: 0;
   align-items: flex-end;
+  isolation: isolate;
+  overflow: hidden;
+  position: relative;
 }
 
 .insight-tab {
+  position: relative;
   border-radius: 0.72rem 0.72rem 0 0;
   border: 1px solid rgba(148, 188, 236, 0.3);
   border-bottom: none;
@@ -244,7 +250,12 @@
   padding: 0.38rem 0.72rem 0.32rem;
   cursor: pointer;
   transform: translateY(2px);
+  margin-left: -0.28rem;
   transition: border-color 160ms ease, color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.insight-tab:first-child {
+  margin-left: 0;
 }
 
 .insight-tab:hover {
@@ -272,6 +283,20 @@
   border-top-left-radius: 0.5rem;
   border-top-right-radius: 0.5rem;
   padding: 0.76rem;
+  margin-top: -1px;
+  position: relative;
+}
+
+.insight-content::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: var(--insight-active-left);
+  width: max(0px, var(--insight-active-width));
+  height: 1px;
+  background: linear-gradient(90deg, rgba(172, 211, 255, 0.08), rgba(214, 235, 255, 0.62), rgba(172, 211, 255, 0.08));
+  box-shadow: 0 0 6px rgba(124, 186, 255, 0.3);
+  pointer-events: none;
 }
 
 .insight-action {

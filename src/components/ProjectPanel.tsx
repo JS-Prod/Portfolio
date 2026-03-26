@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import type { Project } from '../data/projects'
 
@@ -18,6 +18,8 @@ type InsightTab = {
 
 export function ProjectPanel({ project }: ProjectPanelProps) {
   const [activeTab, setActiveTab] = useState<InsightTabKey>('demo')
+  const insightPanelRef = useRef<HTMLDivElement>(null)
+  const tabsRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     setActiveTab('demo')
@@ -44,6 +46,41 @@ export function ProjectPanel({ project }: ProjectPanelProps) {
 
   const activeInsight = insightTabs.find((tab) => tab.key === activeTab) ?? insightTabs[0] ?? null
 
+  useLayoutEffect(() => {
+    const panel = insightPanelRef.current
+    const tabs = tabsRef.current
+
+    if (!panel || !tabs) {
+      return
+    }
+
+    const syncHighlightTrack = () => {
+      const activeElement = tabs.querySelector<HTMLButtonElement>('.insight-tab.active')
+
+      if (!activeElement) {
+        panel.style.setProperty('--insight-active-left', '0px')
+        panel.style.setProperty('--insight-active-width', '0px')
+        return
+      }
+
+      const tabsRect = tabs.getBoundingClientRect()
+      const activeRect = activeElement.getBoundingClientRect()
+      panel.style.setProperty('--insight-active-left', `${activeRect.left - tabsRect.left}px`)
+      panel.style.setProperty('--insight-active-width', `${activeRect.width}px`)
+    }
+
+    syncHighlightTrack()
+
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(syncHighlightTrack) : null
+    observer?.observe(tabs)
+    window.addEventListener('resize', syncHighlightTrack)
+
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', syncHighlightTrack)
+    }
+  }, [activeTab, project?.id, insightTabs.length])
+
   return (
     <aside className="project-panel" aria-live="polite" aria-atomic="true">
       <p className="panel-kicker">Active Constellation Node</p>
@@ -60,20 +97,26 @@ export function ProjectPanel({ project }: ProjectPanelProps) {
             <p className="project-theme">Theme: {project.theme}</p>
             <p>{project.summary}</p>
 
-            <div className="insight-panel">
-              <div className="insight-tabs" role="tablist" aria-label="Project insights">
-                {insightTabs.map((tab) => (
-                  <button
-                    key={tab.key}
-                    type="button"
-                    role="tab"
-                    className={`insight-tab ${activeTab === tab.key ? 'active' : ''}`}
-                    aria-selected={activeTab === tab.key}
-                    onClick={() => setActiveTab(tab.key)}
-                  >
-                    {tab.label}
-                  </button>
-                ))}
+            <div className="insight-panel" ref={insightPanelRef}>
+              <div className="insight-tabs" role="tablist" aria-label="Project insights" ref={tabsRef}>
+                {insightTabs.map((tab, index) => {
+                  const isActive = activeTab === tab.key
+                  const restingZ = insightTabs.length - index
+
+                  return (
+                    <button
+                      key={tab.key}
+                      type="button"
+                      role="tab"
+                      className={`insight-tab ${isActive ? 'active' : ''}`}
+                      aria-selected={isActive}
+                      onClick={() => setActiveTab(tab.key)}
+                      style={{ zIndex: isActive ? insightTabs.length + 2 : restingZ }}
+                    >
+                      {tab.label}
+                    </button>
+                  )
+                })}
               </div>
 
               <div className="impact-block insight-content">
