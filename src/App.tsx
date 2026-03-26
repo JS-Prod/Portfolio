@@ -1,4 +1,5 @@
-import { useDeferredValue, useMemo, useState } from 'react'
+import { useCallback, useState } from 'react'
+import type { TransitionEvent } from 'react'
 import { useReducedMotion } from 'framer-motion'
 
 import './App.css'
@@ -8,21 +9,28 @@ import { projects } from './data/projects'
 
 function App() {
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
-  const deferredActiveProjectId = useDeferredValue(activeProjectId)
+  const [sceneLoading, setSceneLoading] = useState(true)
+  const [loaderVisible, setLoaderVisible] = useState(true)
   const reduceMotion = useReducedMotion() ?? false
   const hasActiveProject = activeProjectId !== null
 
-  const activeProject = useMemo(
-    () => (activeProjectId ? projects.find((project) => project.id === activeProjectId) ?? null : null),
-    [activeProjectId],
-  )
-  const deferredPanelProject = useMemo(
-    () =>
-      deferredActiveProjectId
-        ? projects.find((project) => project.id === deferredActiveProjectId) ?? null
-        : null,
-    [deferredActiveProjectId],
-  )
+  const activePanelProject = activeProjectId
+    ? projects.find((project) => project.id === activeProjectId) ?? null
+    : null
+
+  const handleSceneReady = useCallback(() => {
+    setSceneLoading(false)
+  }, [])
+
+  const handleLoaderTransitionEnd = useCallback((event: TransitionEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) {
+      return
+    }
+
+    if (!sceneLoading) {
+      setLoaderVisible(false)
+    }
+  }, [sceneLoading])
 
   return (
     <div className="portfolio-shell">
@@ -32,17 +40,37 @@ function App() {
           activeProjectId={activeProjectId}
           onSelectProject={setActiveProjectId}
           reducedMotion={reduceMotion}
+          onReady={handleSceneReady}
+          introUnlocked={!loaderVisible}
         />
       </div>
 
+      {loaderVisible && (
+        <div
+          className={`loading-overlay${sceneLoading ? '' : ' is-hidden'}`}
+          aria-live="polite"
+          onTransitionEnd={handleLoaderTransitionEnd}
+        >
+          <div className="loading-spinner" />
+        </div>
+      )}
+
+      {loaderVisible && (
+        <div className="panel-prewarm" aria-hidden="true">
+          <ProjectPanel project={projects[0] ?? null} />
+        </div>
+      )}
+
       <header className="hud-header">
-        <p className="hud-label">Janessa Portfolio / Constellation Interface</p>
+        <p className="hud-label">Joshua Simpson</p>
         <h1>Selected Work</h1>
-        <p>Realtime graphics, voice infrastructure, and interactive audio experiences.</p>
+        <p className="hud-lede">
+          Realtime 3D particle simulation, voice-agent systems, and a musical Android application.
+        </p>
       </header>
 
       <main className="hud-panel">
-        <ProjectPanel project={deferredPanelProject} />
+        <ProjectPanel project={activePanelProject} />
       </main>
 
       <button
@@ -77,10 +105,7 @@ function App() {
         })}
       </nav>
 
-      <p className="interaction-hint">
-        Drag to orbit. Click stars or project chips to inspect. Click an active chip or top arrow to return to neutral.
-      </p>
-      <p className="active-readout">Active: {activeProject ? activeProject.title : 'None'}</p>
+      <p className="interaction-hint">DRAG TO ROTATE. CLICK TO NAVIGATE.</p>
     </div>
   )
 }

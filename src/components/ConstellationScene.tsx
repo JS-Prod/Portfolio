@@ -1,4 +1,4 @@
-import { Html, OrbitControls, Preload } from '@react-three/drei'
+import { Html, OrbitControls } from '@react-three/drei'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
@@ -23,6 +23,8 @@ type ConstellationSceneProps = {
   activeProjectId: string | null
   onSelectProject: (projectId: string | null) => void
   reducedMotion: boolean
+  onReady?: () => void
+  introUnlocked?: boolean
 }
 
 type Connection = {
@@ -72,6 +74,7 @@ type CameraRigProps = {
   activeProject: Project | null
   controlsRef: RefObject<OrbitControlsImpl | null>
   reducedMotion: boolean
+  introUnlocked: boolean
   onTransitionHalfway?: () => void
   onTransitionProgress?: (progress: number) => void
 }
@@ -81,6 +84,7 @@ type IntroConnectionSegmentProps = {
   connectionIndex: number
   lineColor: string
   lineBaseOpacity: number
+  introSequenceActive: boolean
   introRevealActive: boolean
   introRevealProgressRef: RefObject<number>
   reverseTracer: boolean
@@ -173,6 +177,7 @@ type HeroWorldProps = {
   reducedMotion: boolean
   presenceTarget: number
   collapseParticlesOnFadeOut: boolean
+  prewarmActive: boolean
 }
 
 type CinematicBloomProps = {
@@ -181,6 +186,15 @@ type CinematicBloomProps = {
 }
 
 const CONNECTION_DISTANCE = 6.2
+const HERO_PRECOMPILE_IDLE_TIMEOUT_MS = 900
+const HERO_WORLD_MOUNT_DELAY_MS = 220
+const HERO_WORLD_MOUNT_IDLE_TIMEOUT_MS = 1200
+const INTRO_REVEAL_DURATION_S = 2.6
+const INTRO_WARMUP_FRAME_COUNT = 20
+const INTRO_WARMUP_MIN_TIME_MS = 480
+const INTRO_WARMUP_PROGRAM_STABLE_FRAMES = 8
+const INTRO_FONT_READY_TIMEOUT_MS = 1800
+const INTRO_CONNECTION_SPEED_MULTIPLIER = 0.92
 const WORLD_UP = new THREE.Vector3(0, 1, 0)
 const X_AXIS = new THREE.Vector3(1, 0, 0)
 const WHITE = new THREE.Color('#ffffff')
@@ -804,7 +818,7 @@ function getCameraTransitionDuration(mode: CameraTransitionMode, viewportWidth: 
   }
 
   if (mode === 'neutral-intro') {
-    return viewportWidth < 900 ? 1.6 : 1.8
+    return viewportWidth < 900 ? 2.25 : 2.55
   }
 
   if (mode === 'neutral-to-focus' || mode === 'focus-to-neutral') {
@@ -1617,7 +1631,7 @@ function ProjectNode({
 }: ProjectNodeProps) {
   const isNeutralNode = nodeDisplayMode === 'neutral'
   const introVisibilityStatic = isNeutralNode
-    ? smoothstep(0, 1, clamp01((clamp01(introRevealRef.current) - introRevealOffset) / 0.34))
+    ? smoothstep(0, 1, clamp01((clamp01(introRevealRef.current) - introRevealOffset) / 0.36))
     : 1
   const neutralNeedsTransparency = !isNeutralNode || neutralBlendOverride !== null || introVisibilityStatic < 0.999
   const groupRef = useRef<THREE.Group>(null)
@@ -1642,7 +1656,7 @@ function ProjectNode({
     }
 
     if (isNeutralNode) {
-      const introVisibility = smoothstep(0, 1, clamp01((clamp01(introRevealRef.current) - introRevealOffset) / 0.34))
+      const introVisibility = smoothstep(0, 1, clamp01((clamp01(introRevealRef.current) - introRevealOffset) / 0.36))
       groupRef.current.scale.setScalar(Math.max(0.0001, introVisibility))
       return
     }
@@ -1674,7 +1688,7 @@ function ProjectNode({
     const neutralBlend = neutralBlendRef.current
     const neutralModeOpacity = neutralBlendOverride === null ? 1 : neutralBlend
     const introVisibility = isNeutralNode
-      ? smoothstep(0, 1, clamp01((clamp01(introRevealRef.current) - introRevealOffset) / 0.34))
+      ? smoothstep(0, 1, clamp01((clamp01(introRevealRef.current) - introRevealOffset) / 0.36))
       : 1
     const introFlash = Math.exp(-Math.pow(introVisibility - 0.72, 2) / 0.014)
     const pulseAmplitude = THREE.MathUtils.lerp(0.024, 0.048, neutralBlend)
@@ -1835,7 +1849,7 @@ function ProjectNode({
   )
 }
 
-function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOnFadeOut }: HeroWorldProps) {
+function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOnFadeOut, prewarmActive }: HeroWorldProps) {
   const groupRef = useRef<THREE.Group>(null)
   const coreRef = useRef<THREE.Object3D>(null)
   const coreMaskRef = useRef<THREE.Mesh>(null)
@@ -1988,6 +2002,36 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
     }
   }, [])
 
+  useEffect(() => {
+    if (prewarmActive || presenceTarget > 0.0001) {
+      return
+    }
+
+    presenceRef.current = 0
+
+    if (groupRef.current) {
+      groupRef.current.visible = false
+    }
+    if (shellMaskRef.current) {
+      shellMaskRef.current.visible = false
+    }
+    if (shellOcclusionRef.current) {
+      shellOcclusionRef.current.visible = false
+    }
+    if (shellAccentMaskRef.current) {
+      shellAccentMaskRef.current.visible = false
+    }
+    if (coreMaskRef.current) {
+      coreMaskRef.current.visible = false
+    }
+    if (shellStarBlockerRef.current) {
+      shellStarBlockerRef.current.visible = false
+    }
+    if (coreStarBlockerRef.current) {
+      coreStarBlockerRef.current.visible = false
+    }
+  }, [prewarmActive, presenceTarget])
+
   useEffect(
     () => () => {
       etherealFilaments.geometry.dispose()
@@ -2078,8 +2122,9 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
     const elapsed = clock.getElapsedTime()
     const frameDelta = reducedMotion ? delta : Math.min(delta, 1 / 28)
     const presenceLerp = 1 - Math.exp(-(reducedMotion ? 18 : 10.5) * frameDelta)
-    presenceRef.current = THREE.MathUtils.lerp(presenceRef.current, clamp01(presenceTarget), presenceLerp)
-    const intensity = clamp01(presenceRef.current)
+    const warmedPresenceTarget = prewarmActive ? Math.max(presenceTarget, 0.18) : presenceTarget
+    presenceRef.current = THREE.MathUtils.lerp(presenceRef.current, clamp01(warmedPresenceTarget), presenceLerp)
+    const intensity = clamp01(prewarmActive ? Math.max(presenceRef.current, 0.18) : presenceRef.current)
     const isVisible = intensity > 0.008
     const maskVisible = intensity > 0.05
 
@@ -2122,6 +2167,11 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
         updateParticleField(streamParticles, style, warmupElapsed * 0.5, warmupDelta, warmupIntensity, false)
         updateEtherealFilamentSimulation(etherealFilaments, warmupElapsed, warmupDelta, 1, reducedMotion)
         updateEtherealFilamentGeometry(etherealFilaments)
+      }
+
+      if (streamPointsRef.current) {
+        const streamPosition = streamPointsRef.current.geometry.attributes.position as THREE.BufferAttribute
+        streamPosition.needsUpdate = true
       }
 
       simulationWarmupStepsRef.current -= warmupBatch
@@ -2999,6 +3049,7 @@ function CameraRig({
   activeProject,
   controlsRef,
   reducedMotion,
+  introUnlocked,
   onTransitionHalfway,
   onTransitionProgress,
 }: CameraRigProps) {
@@ -3289,6 +3340,10 @@ function CameraRig({
     endOffsetDirectionRef.current.copy(endOffset.normalize())
 
     camera.position.copy(startCameraRef.current)
+    if (isInitialNeutralTransitionRef.current) {
+      const introSwayAtStart = size.width < 900 ? -0.022 : -0.036
+      camera.position.addScaledVector(introSwayAxisRef.current, introSwayAtStart)
+    }
     if (controls) {
       controls.target.copy(startTargetRef.current)
       controls.update()
@@ -3351,6 +3406,19 @@ function CameraRig({
     controls.enableDamping = false
 
     const transitionMode = transitionModeRef.current
+    if (transitionMode === 'neutral-intro' && !introUnlocked) {
+      transitionStartTimeRef.current = performance.now() * 0.001
+      progressRef.current = 0
+      onTransitionProgress?.(0)
+      controls.target.copy(startTargetRef.current)
+      camera.position.copy(startCameraRef.current)
+      const introSwayAtStart = size.width < 900 ? -0.022 : -0.036
+      camera.position.addScaledVector(introSwayAxisRef.current, introSwayAtStart)
+      camera.lookAt(startTargetRef.current)
+      camera.updateMatrixWorld()
+      return
+    }
+
     const transitionDuration = Math.max(0.01, transitionDurationRef.current)
     const elapsed = Math.max(0, performance.now() * 0.001 - transitionStartTimeRef.current)
     const nextProgress = Math.min(1, elapsed / transitionDuration)
@@ -3553,7 +3621,13 @@ function CinematicLights({ project, reducedMotion }: { project: Project | null; 
   )
 }
 
-function NeutralStarField({ reducedMotion }: { reducedMotion: boolean }) {
+function NeutralStarField({
+  reducedMotion,
+  bootstrapProgressRef,
+}: {
+  reducedMotion: boolean
+  bootstrapProgressRef?: RefObject<number>
+}) {
   const baseGroupRef = useRef<THREE.Group>(null)
   const midGroupRef = useRef<THREE.Group>(null)
   const overlayGroupRef = useRef<THREE.Group>(null)
@@ -3624,18 +3698,35 @@ function NeutralStarField({ reducedMotion }: { reducedMotion: boolean }) {
 
   useFrame(({ clock }) => {
     const elapsed = clock.getElapsedTime()
+    const bootstrapReveal = clamp01(bootstrapProgressRef?.current ?? 1)
+    const revealBlend = smoothstep(0, 1, bootstrapReveal)
+
+    if (baseMeshRef.current) {
+      baseMeshRef.current.count = Math.floor(neutralBaseStars.count * revealBlend)
+    }
+
+    if (midMeshRef.current) {
+      midMeshRef.current.count = Math.floor(neutralMidStars.count * revealBlend)
+    }
+
+    if (overlayMeshRef.current) {
+      overlayMeshRef.current.count = Math.floor(neutralOverlayStars.count * revealBlend)
+    }
 
     if (baseGroupRef.current) {
+      baseGroupRef.current.visible = revealBlend > 0.001
       baseGroupRef.current.rotation.y = reducedMotion ? 0 : elapsed * 0.006
       baseGroupRef.current.rotation.x = reducedMotion ? 0 : Math.sin(elapsed * 0.03) * 0.012
     }
 
     if (midGroupRef.current) {
+      midGroupRef.current.visible = revealBlend > 0.001
       midGroupRef.current.rotation.y = reducedMotion ? 0 : -elapsed * 0.0054 + 0.22
       midGroupRef.current.rotation.x = reducedMotion ? 0 : Math.sin(elapsed * 0.022) * 0.014
     }
 
     if (overlayGroupRef.current) {
+      overlayGroupRef.current.visible = revealBlend > 0.001
       overlayGroupRef.current.rotation.y = reducedMotion ? 0 : -elapsed * 0.0048 + 0.4
       overlayGroupRef.current.rotation.x = reducedMotion ? 0 : Math.cos(elapsed * 0.028) * 0.01
     }
@@ -3652,12 +3743,12 @@ function NeutralStarField({ reducedMotion }: { reducedMotion: boolean }) {
 
     if (nebulaNearMaterialRef.current) {
       nebulaNearMaterialRef.current.uniforms.uTime.value = elapsed
-      nebulaNearMaterialRef.current.uniforms.uOpacity.value = 0.07 + Math.sin(elapsed * 0.14) * 0.008
+      nebulaNearMaterialRef.current.uniforms.uOpacity.value = (0.07 + Math.sin(elapsed * 0.14) * 0.008) * revealBlend
     }
 
     if (nebulaFarMaterialRef.current) {
       nebulaFarMaterialRef.current.uniforms.uTime.value = elapsed + 11
-      nebulaFarMaterialRef.current.uniforms.uOpacity.value = 0.055 + Math.cos(elapsed * 0.11) * 0.007
+      nebulaFarMaterialRef.current.uniforms.uOpacity.value = (0.055 + Math.cos(elapsed * 0.11) * 0.007) * revealBlend
     }
   })
 
@@ -3781,6 +3872,7 @@ function IntroConnectionSegment({
   connectionIndex,
   lineColor,
   lineBaseOpacity,
+  introSequenceActive,
   introRevealActive,
   introRevealProgressRef,
   reverseTracer,
@@ -3826,11 +3918,16 @@ function IntroConnectionSegment({
       return
     }
 
-    const introProgress = introRevealActive ? introRevealProgressRef.current : 1
-    const lineReveal = introRevealActive ? clamp01((introProgress - connectionIndex * 0.045) / 0.42) : 1
+    const introProgress = introSequenceActive ? introRevealProgressRef.current : 1
+    const lineReveal = introSequenceActive
+      ? clamp01(
+          (introProgress - connectionIndex * (0.045 / INTRO_CONNECTION_SPEED_MULTIPLIER)) /
+            (0.42 / INTRO_CONNECTION_SPEED_MULTIPLIER),
+        )
+      : 1
     const renderedLength = Math.max(0.001, connection.length * lineReveal)
 
-    if (introRevealActive) {
+    if (introSequenceActive) {
       const lineCenterDistance = reverseTracer ? connection.length - renderedLength * 0.5 : renderedLength * 0.5
       lineCenterRef.copy(start).addScaledVector(direction, lineCenterDistance)
       lineMesh.position.copy(lineCenterRef)
@@ -3839,14 +3936,21 @@ function IntroConnectionSegment({
     }
 
     lineMesh.scale.set(1, renderedLength, 1)
-    lineMaterial.opacity = lineBaseOpacity * (introRevealActive ? lineReveal : 1)
+    lineMaterial.opacity = lineBaseOpacity * (introSequenceActive ? lineReveal : 1)
 
-    if (!introRevealActive) {
-      tracerMesh.visible = false
+    if (!introSequenceActive) {
+      tracerMesh.position.copy(midpoint)
+      tracerMesh.scale.set(1, 0.001, 1)
+      tracerMaterial.opacity = 0
       return
     }
 
-    const tracerProgressLinear = clamp01((introProgress - 0.08 - connectionIndex * 0.05) / 0.52)
+    const tracerProgressLinear = introRevealActive
+      ? clamp01(
+          (introProgress - 0.08 - connectionIndex * (0.05 / INTRO_CONNECTION_SPEED_MULTIPLIER)) /
+            (0.52 / INTRO_CONNECTION_SPEED_MULTIPLIER),
+        )
+      : 0
     const tracerDistance = THREE.MathUtils.lerp(0, connection.length, tracerProgressLinear)
     const tracerMaxLength = Math.min(0.4, Math.max(0.14, connection.length * 0.14))
     const halfMax = tracerMaxLength * 0.5
@@ -3854,7 +3958,9 @@ function IntroConnectionSegment({
     const tracerHalf = Math.min(halfMax, halfBoundary)
 
     if (tracerHalf <= 0.0005) {
-      tracerMesh.visible = false
+      tracerMesh.position.copy(midpoint)
+      tracerMesh.scale.set(1, 0.001, 1)
+      tracerMaterial.opacity = 0
       return
     }
 
@@ -3862,7 +3968,6 @@ function IntroConnectionSegment({
     const tracerCenterDistanceDirected = reverseTracer ? connection.length - tracerDistance : tracerDistance
 
     tracerCenterRef.copy(start).addScaledVector(direction, tracerCenterDistanceDirected)
-    tracerMesh.visible = true
     tracerMesh.position.copy(tracerCenterRef)
     tracerMesh.scale.set(1, tracerLength, 1)
     tracerMaterial.opacity = halfMax <= 0 ? 0 : 0.94 * smoothstep(0, 1, tracerHalf / halfMax)
@@ -3884,7 +3989,7 @@ function IntroConnectionSegment({
         />
       </mesh>
 
-      <mesh ref={tracerMeshRef} position={connection.midpoint} quaternion={connection.quaternion} renderOrder={-19} visible={false}>
+      <mesh ref={tracerMeshRef} position={connection.midpoint} quaternion={connection.quaternion} renderOrder={-19}>
         <cylinderGeometry args={[0.018, 0.018, 1, 10, 1, true]} />
         <meshBasicMaterial
           ref={tracerMaterialRef}
@@ -3901,13 +4006,24 @@ function IntroConnectionSegment({
   )
 }
 
-function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotion }: ConstellationSceneProps) {
+function SceneContent({
+  projects,
+  activeProjectId,
+  onSelectProject,
+  reducedMotion,
+  onReady,
+  introUnlocked = true,
+}: ConstellationSceneProps) {
   const { gl, scene, camera } = useThree()
   const [hoveredProjectId, setHoveredProjectId] = useState<string | null>(null)
   const [visualActiveProjectId, setVisualActiveProjectId] = useState<string | null>(activeProjectId)
   const [outgoingHeroProjectId, setOutgoingHeroProjectId] = useState<string | null>(null)
   const [transitionProgress, setTransitionProgress] = useState(1)
   const [introComplete, setIntroComplete] = useState(reducedMotion || activeProjectId !== null)
+  const [heroWorldsMounted, setHeroWorldsMounted] = useState(
+    reducedMotion || activeProjectId !== null || !introUnlocked,
+  )
+  const [fontsReady, setFontsReady] = useState(reducedMotion)
 
   const controlsRef = useRef<OrbitControlsImpl | null>(null)
   const heroCompileGroupRef = useRef<THREE.Group>(null)
@@ -3917,7 +4033,16 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
   const outgoingHeroProjectIdRef = useRef<string | null>(outgoingHeroProjectId)
   const visualProjectIdRef = useRef<string | null>(activeProjectId)
   const initialRevealRef = useRef(reducedMotion ? 1 : 0)
+  const introRevealStartTimeRef = useRef<number | null>(null)
+  const heroWorldMountTimeoutRef = useRef<number | null>(null)
+  const heroWorldMountIdleRef = useRef<number | null>(null)
   const pendingNeutralSelectionRef = useRef<string | null>(null)
+  const warmupFrameCountRef = useRef(0)
+  const warmupStartTimeRef = useRef(0)
+  const warmupLastProgramCountRef = useRef<number>(-1)
+  const warmupProgramStableFramesRef = useRef(0)
+  const bootstrapProgressRef = useRef(reducedMotion || activeProjectId !== null ? 1 : 0)
+  const onReadyCalledRef = useRef(false)
 
   const connections = useMemo(() => buildConnections(projects), [projects])
   const connectionVisuals = useMemo<ConnectionVisual[]>(
@@ -4173,17 +4298,110 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
       tracerOpacity: 0.94 * fade * tracerEnvelope,
     }
   }, [focusSwapTracePath, isFocusToFocusTransition, transitionProgress])
-  const introRevealActive = !reducedMotion && !visualActiveProjectId && !introComplete
-  const shouldMountHeroWorlds = introComplete || visualActiveProjectId !== null || outgoingHeroProjectId !== null
+  const introSequenceActive = !reducedMotion && !visualActiveProjectId && !introComplete
+  const introRevealActive = introSequenceActive && introUnlocked
+  const hideIntroConnectionsDuringBootstrap = introSequenceActive && !introUnlocked
+  const heroPrewarmActive = !introUnlocked && !reducedMotion && activeProjectId === null
+  const shouldMountHeroWorlds = heroWorldsMounted || visualActiveProjectId !== null || outgoingHeroProjectId !== null
 
-  useFrame((_state, delta) => {
+  useEffect(() => {
+    if (reducedMotion) {
+      setFontsReady(true)
+      return
+    }
+
+    const supportsFontLoading = 'fonts' in document
+
+    if (!supportsFontLoading) {
+      setFontsReady(true)
+      return
+    }
+
+    let cancelled = false
+    const timeoutId = window.setTimeout(() => {
+      if (!cancelled) {
+        setFontsReady(true)
+      }
+    }, INTRO_FONT_READY_TIMEOUT_MS)
+
+    void document.fonts.ready
+      .then(() => {
+        if (!cancelled) {
+          setFontsReady(true)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setFontsReady(true)
+        }
+      })
+      .finally(() => {
+        window.clearTimeout(timeoutId)
+      })
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(timeoutId)
+    }
+  }, [reducedMotion])
+
+  useFrame(() => {
+    if (onReadyCalledRef.current) {
+      bootstrapProgressRef.current = 1
+      return
+    }
+
+    if (warmupFrameCountRef.current === 0) {
+      warmupStartTimeRef.current = performance.now()
+    }
+
+    const elapsedMs = performance.now() - warmupStartTimeRef.current
+    const frameProgress = clamp01(warmupFrameCountRef.current / Math.max(1, INTRO_WARMUP_FRAME_COUNT))
+    const timeProgress = clamp01(elapsedMs / INTRO_WARMUP_MIN_TIME_MS)
+    bootstrapProgressRef.current = Math.min(frameProgress, timeProgress)
+
+    const renderer = gl as THREE.WebGLRenderer
+    const programList = (renderer.info as { programs?: unknown[] }).programs
+    const programCount = Array.isArray(programList) ? programList.length : 0
+
+    if (programCount === warmupLastProgramCountRef.current) {
+      warmupProgramStableFramesRef.current += 1
+    } else {
+      warmupProgramStableFramesRef.current = 0
+      warmupLastProgramCountRef.current = programCount
+    }
+
+    warmupFrameCountRef.current += 1
+
+    const requiresHeroPrewarm = !reducedMotion && activeProjectId === null
+    const heroPrewarmDone = !requiresHeroPrewarm || hasCompiledHeroRef.current
+    const warmupDone =
+      warmupFrameCountRef.current >= INTRO_WARMUP_FRAME_COUNT &&
+      elapsedMs >= INTRO_WARMUP_MIN_TIME_MS &&
+      warmupProgramStableFramesRef.current >= INTRO_WARMUP_PROGRAM_STABLE_FRAMES &&
+      fontsReady &&
+      heroPrewarmDone
+
+    if (warmupDone) {
+      onReadyCalledRef.current = true
+      bootstrapProgressRef.current = 1
+      initialRevealRef.current = 0
+      introRevealStartTimeRef.current = null
+      onReady?.()
+    }
+  }, -4)
+
+  useFrame(() => {
     if (!introRevealActive || initialRevealRef.current >= 1) {
       return
     }
 
-    const frameDelta = reducedMotion ? delta : Math.min(delta, 1 / 60)
-    const duration = 1.76
-    const next = Math.min(1, initialRevealRef.current + frameDelta / duration)
+    if (introRevealStartTimeRef.current === null) {
+      introRevealStartTimeRef.current = performance.now() * 0.001 - initialRevealRef.current * INTRO_REVEAL_DURATION_S
+    }
+
+    const elapsed = Math.max(0, performance.now() * 0.001 - introRevealStartTimeRef.current)
+    const next = clamp01(elapsed / INTRO_REVEAL_DURATION_S)
     initialRevealRef.current = next
 
     if (next >= 1 && !introComplete) {
@@ -4220,10 +4438,82 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
 
   useEffect(() => {
     if (reducedMotion || visualActiveProjectId) {
+      bootstrapProgressRef.current = 1
       initialRevealRef.current = 1
+      introRevealStartTimeRef.current = null
       setIntroComplete(true)
+      if (!onReadyCalledRef.current) {
+        onReadyCalledRef.current = true
+        onReady?.()
+      }
     }
-  }, [reducedMotion, visualActiveProjectId])
+  }, [onReady, reducedMotion, visualActiveProjectId])
+
+  useEffect(() => {
+    if (!introRevealActive || initialRevealRef.current >= 1) {
+      introRevealStartTimeRef.current = null
+      return
+    }
+
+    introRevealStartTimeRef.current = performance.now() * 0.001 - initialRevealRef.current * INTRO_REVEAL_DURATION_S
+  }, [introRevealActive])
+
+  useEffect(() => {
+    const clearPendingMount = () => {
+      if (heroWorldMountTimeoutRef.current !== null) {
+        window.clearTimeout(heroWorldMountTimeoutRef.current)
+        heroWorldMountTimeoutRef.current = null
+      }
+
+      if (heroWorldMountIdleRef.current !== null) {
+        if ('cancelIdleCallback' in window) {
+          window.cancelIdleCallback(heroWorldMountIdleRef.current)
+        }
+        heroWorldMountIdleRef.current = null
+      }
+    }
+
+    const mustMountImmediately = reducedMotion || visualActiveProjectId !== null || outgoingHeroProjectId !== null
+
+    if (mustMountImmediately) {
+      clearPendingMount()
+      if (!heroWorldsMounted) {
+        setHeroWorldsMounted(true)
+      }
+      return clearPendingMount
+    }
+
+    if (!introComplete || heroWorldsMounted) {
+      clearPendingMount()
+      return clearPendingMount
+    }
+
+    heroWorldMountTimeoutRef.current = window.setTimeout(() => {
+      const mountHeroWorlds = () => {
+        heroWorldMountIdleRef.current = null
+        startTransition(() => {
+          setHeroWorldsMounted(true)
+        })
+      }
+
+      if ('requestIdleCallback' in window) {
+        heroWorldMountIdleRef.current = window.requestIdleCallback(mountHeroWorlds, {
+          timeout: HERO_WORLD_MOUNT_IDLE_TIMEOUT_MS,
+        })
+        return
+      }
+
+      mountHeroWorlds()
+    }, HERO_WORLD_MOUNT_DELAY_MS)
+
+    return clearPendingMount
+  }, [
+    heroWorldsMounted,
+    introComplete,
+    outgoingHeroProjectId,
+    reducedMotion,
+    visualActiveProjectId,
+  ])
 
   const handleTransitionProgress = useCallback((progress: number) => {
     const isNeutralIntroProgress =
@@ -4261,6 +4551,7 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
         !reducedMotion &&
         !hasCompiledHeroRef.current
       ) {
+        setHeroWorldsMounted(true)
         pendingNeutralSelectionRef.current = projectId
         return
       }
@@ -4276,6 +4567,14 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
 
   useEffect(
     () => () => {
+      if (heroWorldMountTimeoutRef.current !== null) {
+        window.clearTimeout(heroWorldMountTimeoutRef.current)
+        heroWorldMountTimeoutRef.current = null
+      }
+      if (heroWorldMountIdleRef.current !== null && 'cancelIdleCallback' in window) {
+        window.cancelIdleCallback(heroWorldMountIdleRef.current)
+        heroWorldMountIdleRef.current = null
+      }
       heroWarmupTargetRef.current?.dispose()
       heroWarmupTargetRef.current = null
     },
@@ -4295,12 +4594,16 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
 
     const canPrecompile =
       reducedMotion ||
+      !introUnlocked ||
       introComplete ||
       (visualActiveProjectId !== null && transitionProgress >= 1)
 
     if (!canPrecompile) {
       return
     }
+
+    const hasPendingSelection = Boolean(pendingNeutralSelectionRef.current)
+    const shouldWaitForIdle = introUnlocked && introComplete && !hasPendingSelection
 
     heroCompileRequestedRef.current = true
     const renderer = gl as THREE.WebGLRenderer
@@ -4352,36 +4655,53 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
         renderer.xr.enabled = previousXrEnabled
       }
     }
-    const shouldCompileSynchronously =
-      introComplete &&
-      visualActiveProjectId === null &&
-      outgoingHeroProjectId === null &&
-      transitionProgress >= 1
-
-    if (shouldCompileSynchronously) {
-      try {
-        renderer.compile(heroCompileGroup, camera, scene)
-        renderWarmupFrame()
-      } catch {
-        // Ignore precompile failures and allow runtime compile as fallback.
-      } finally {
-        restoreVisibility()
-        hasCompiledHeroRef.current = true
-        flushPendingSelection()
-      }
-      return
-    }
 
     void (async () => {
       try {
+        if (shouldWaitForIdle) {
+          await new Promise<void>((resolve) => {
+            let settled = false
+
+            const finish = () => {
+              if (settled) {
+                return
+              }
+
+              settled = true
+              resolve()
+            }
+
+            const timeoutId = window.setTimeout(finish, HERO_PRECOMPILE_IDLE_TIMEOUT_MS)
+
+            if ('requestIdleCallback' in window) {
+              window.requestIdleCallback(
+                () => {
+                  window.clearTimeout(timeoutId)
+                  finish()
+                },
+                { timeout: HERO_PRECOMPILE_IDLE_TIMEOUT_MS },
+              )
+            }
+          })
+        }
+
         if (typeof renderer.compileAsync === 'function') {
           await renderer.compileAsync(heroCompileGroup, camera, scene)
         } else {
+          await new Promise<void>((resolve) => {
+            window.setTimeout(resolve, 0)
+          })
           renderer.compile(heroCompileGroup, camera, scene)
         }
         renderWarmupFrame()
       } catch {
-        // Ignore precompile failures and allow runtime compile as fallback.
+        // Fallback to sync compile so first focus transition is never the first shader compile.
+        try {
+          renderer.compile(heroCompileGroup, camera, scene)
+          renderWarmupFrame()
+        } catch {
+          // If fallback compile also fails, runtime compile remains the final safety net.
+        }
       } finally {
         restoreVisibility()
         hasCompiledHeroRef.current = true
@@ -4408,20 +4728,25 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
         const linkedToSelection =
           visualActiveProjectId === null ? showAllConnections || linkedToHover : focusedHoverConnection
 
-        if (!linkedToSelection) {
-          return null
-        }
+      if (!linkedToSelection) {
+        return null
+      }
 
-        return (
-          <IntroConnectionSegment
+      if (hideIntroConnectionsDuringBootstrap) {
+        return null
+      }
+
+      return (
+        <IntroConnectionSegment
             key={connection.id}
             connection={connection}
             connectionIndex={connectionIndex}
             lineColor={visualActiveProjectId ? activeConnectionColor : neutralConnectionColor}
             lineBaseOpacity={visualActiveProjectId ? mapVisibility * 0.52 : 1}
+            introSequenceActive={introSequenceActive}
             introRevealActive={introRevealActive}
             introRevealProgressRef={initialRevealRef}
-            reverseTracer={introRevealActive && connection.id === topmostConnectionId}
+            reverseTracer={introSequenceActive && connection.id === topmostConnectionId}
           />
         )
       })}
@@ -4471,7 +4796,7 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
           nodeDisplayMode={!visualActiveProjectId ? 'neutral' : 'background'}
           neutralBlendOverride={lowFiNeutralBlendOverride}
           introRevealRef={initialRevealRef}
-          introRevealOffset={0.43 + projectIndex * 0.15}
+          introRevealOffset={0.38 + projectIndex * 0.13}
           reducedMotion={reducedMotion}
           onHover={setHoveredProjectId}
           onSelect={handleNodeSelect}
@@ -4493,6 +4818,7 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
                 reducedMotion={reducedMotion}
                 presenceTarget={presenceTarget}
                 collapseParticlesOnFadeOut={isOutgoing}
+                prewarmActive={heroPrewarmActive}
               />
             )
           })}
@@ -4510,7 +4836,7 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
         <meshBasicMaterial colorWrite={false} depthWrite={false} depthTest={false} toneMapped={false} />
       </mesh>
 
-      <NeutralStarField reducedMotion={reducedMotion} />
+      <NeutralStarField reducedMotion={reducedMotion} bootstrapProgressRef={bootstrapProgressRef} />
 
       <OrbitControls
         ref={controlsRef}
@@ -4533,11 +4859,11 @@ function SceneContent({ projects, activeProjectId, onSelectProject, reducedMotio
         activeProject={activeProject}
         controlsRef={controlsRef}
         reducedMotion={reducedMotion}
+        introUnlocked={introUnlocked}
         onTransitionProgress={handleTransitionProgress}
       />
 
       <CinematicBloom project={visualActiveProject} reducedMotion={reducedMotion} />
-      <Preload all />
     </>
   )
 }
