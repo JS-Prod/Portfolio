@@ -627,17 +627,19 @@ attribute float aFlicker;
 
 uniform float uTime;
 uniform float uBaseSize;
+uniform float uPixelRatio;
 uniform float uIntensity;
 
 varying float vPulse;
-varying float vFlicker;
+varying float vDepthFade;
 
 void main() {
-  vFlicker = aFlicker;
   vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-  float pulse = sin(uTime * (0.9 + aFlicker * 1.9) + aFlicker * 21.0) * 0.5 + 0.5;
-  vPulse = pulse;
-  gl_PointSize = (uBaseSize * aSize * (0.75 + pulse * 0.5) * (0.25 + uIntensity * 0.75)) / max(0.08, -mvPosition.z);
+  float twinkle = sin(uTime * (1.2 + aFlicker * 2.4) + aFlicker * 23.0) * 0.5 + 0.5;
+  vPulse = twinkle;
+  vDepthFade = clamp(1.0 - (-mvPosition.z / 26.0), 0.0, 1.0);
+  float size = (uBaseSize * aSize * (0.42 + twinkle * 0.78) * uPixelRatio * uIntensity) / max(0.08, -mvPosition.z);
+  gl_PointSize = size;
   gl_Position = projectionMatrix * mvPosition;
 }
 `
@@ -647,22 +649,23 @@ uniform vec3 uColor;
 uniform float uOpacity;
 
 varying float vPulse;
-varying float vFlicker;
+varying float vDepthFade;
 
 void main() {
   vec2 centered = gl_PointCoord * 2.0 - 1.0;
-  float r2 = dot(centered, centered);
+  float distanceSquared = dot(centered, centered);
 
-  if (r2 > 1.0) {
+  if (distanceSquared > 1.0) {
     discard;
   }
 
-  float core = exp(-r2 * 7.5);
-  float halo = exp(-r2 * 2.8);
-  float sparkle = 0.9 + sin(vFlicker * 41.0 + r2 * 8.0) * 0.1;
-  float alpha = (core * 0.72 + halo * 0.28) * (0.72 + vPulse * 0.28) * sparkle * uOpacity;
-  vec3 color = uColor * (0.78 + vPulse * 0.22 + (1.0 - r2) * 0.22);
-  gl_FragColor = vec4(color, alpha);
+  float core = exp(-distanceSquared * 9.8);
+  float halo = exp(-distanceSquared * 4.2);
+  float edge = smoothstep(1.0, 0.0, distanceSquared);
+  float glow = (core * 0.88 + halo * 0.12) * edge * (0.52 + vPulse * 0.48) * (0.62 + vDepthFade * 0.38);
+  vec3 color = uColor * (0.74 + vPulse * 0.2);
+
+  gl_FragColor = vec4(color, glow * uOpacity);
 }
 `
 
@@ -939,7 +942,7 @@ function HeroCoreGeometry({ kind }: { kind: HeroKind }) {
 
 const ETHEREAL_FILAMENT_PRESETS: Record<HeroKind, EtherealFilamentConfig> = {
   storm: {
-    filamentCount: 8,
+    filamentCount: 10,
     trailLength: 56,
     orbitStrength: 3.1,
     windStrength: 2.2,
@@ -953,7 +956,7 @@ const ETHEREAL_FILAMENT_PRESETS: Record<HeroKind, EtherealFilamentConfig> = {
     crossSectionSegments: 14,
   },
   harmonic: {
-    filamentCount: 8,
+    filamentCount: 10,
     trailLength: 62,
     orbitStrength: 2.7,
     windStrength: 1.8,
@@ -967,7 +970,7 @@ const ETHEREAL_FILAMENT_PRESETS: Record<HeroKind, EtherealFilamentConfig> = {
     crossSectionSegments: 14,
   },
   pulse: {
-    filamentCount: 8,
+    filamentCount: 10,
     trailLength: 54,
     orbitStrength: 2.9,
     windStrength: 1.95,
@@ -1022,18 +1025,8 @@ const CORE_DUST_PRESETS: Record<HeroKind, CoreDustProfile> = {
 }
 
 function createParticleField(style: HeroStyle, seed: string, profile: 'stream' | 'dust'): HeroParticleField {
-  const profileScale =
-    profile === 'stream'
-      ? style.kind === 'harmonic'
-        ? 0.24
-        : 0.27
-      : style.kind === 'storm'
-        ? 0.22
-        : 0.2
-  const count =
-    profile === 'stream'
-      ? Math.max(170, Math.round(style.swarmCount * profileScale))
-      : Math.max(56, Math.round(style.swarmCount * profileScale * 0.4))
+  const count = profile === 'stream' ? style.swarmCount : Math.max(64, Math.round(style.swarmCount * 0.15))
+  const shellSafeRadius = style.shellScale * (profile === 'stream' ? 1.08 : 1.02)
   const positions = new Float32Array(count * 3)
   const velocities = new Float32Array(count * 3)
   const basePositions = new Float32Array(count * 3)
@@ -1045,40 +1038,43 @@ function createParticleField(style: HeroStyle, seed: string, profile: 'stream' |
   const sizes = new Float32Array(count)
   const flickers = new Float32Array(count)
   const random = createRandom(getHash(seed) + count + (profile === 'stream' ? 77 : 131))
-  const strandCount = style.kind === 'storm' ? 18 : style.kind === 'harmonic' ? 16 : 14
 
   for (let index = 0; index < count; index += 1) {
     const offset = index * 3
     const angle = random() * Math.PI * 2
+    const t = index / Math.max(count - 1, 1)
 
     phases[index] = random() * Math.PI * 2
-    speeds[index] = profile === 'stream' ? 0.74 + random() * 1.16 : 0.18 + random() * 0.48
+    speeds[index] = 0.35 + random() * 0.85
     flickers[index] = random()
-    bands[index] = (index % strandCount) / strandCount
+    sizes[index] = 0.78 + random() * 1.3
+    bands[index] = t
     lifts[index] = random() * 2 - 1
 
-    if (profile === 'stream') {
-      const bandPhase = bands[index] * Math.PI * 2
-      const streamRadius =
-        style.kind === 'storm' ? 1.2 + random() * 1.2 : style.kind === 'harmonic' ? 1.0 + random() * 1.0 : 1.1 + random() * 1.1
-      const streamLift = (random() - 0.5) * (style.kind === 'harmonic' ? 1.4 : 0.9)
-
-      basePositions[offset] = Math.cos(bandPhase) * streamRadius
-      basePositions[offset + 1] = streamLift
-      basePositions[offset + 2] = Math.sin(bandPhase) * streamRadius
-
-      radii[index] = streamRadius
-      sizes[index] = 0.8 + random() * 1.36
-    } else {
+    if (style.kind === 'storm') {
       const phi = Math.acos(1 - 2 * random())
-      const spread = style.kind === 'harmonic' ? 0.6 + Math.pow(random(), 1.25) * 1.8 : 0.7 + Math.pow(random(), 1.2) * 2.1
-
-      basePositions[offset] = Math.sin(phi) * Math.cos(angle) * spread
-      basePositions[offset + 1] = Math.cos(phi) * spread * (style.kind === 'harmonic' ? 1.35 : 1.0)
-      basePositions[offset + 2] = Math.sin(phi) * Math.sin(angle) * spread
-
+      const minSpread = shellSafeRadius / 0.8 + 0.06
+      const spread = minSpread + Math.pow(random(), 1.1) * 1.68
+      basePositions[offset] = Math.sin(phi) * Math.cos(angle)
+      basePositions[offset + 1] = Math.cos(phi)
+      basePositions[offset + 2] = Math.sin(phi) * Math.sin(angle)
       radii[index] = spread
-      sizes[index] = 1.0 + random() * 1.45
+    } else if (style.kind === 'harmonic') {
+      const turns = 8.2
+      const helixAngle = t * Math.PI * turns + random() * 0.35
+      const minRadius = shellSafeRadius + 0.1
+      const radius = minRadius + random() * 0.98
+      basePositions[offset] = Math.cos(helixAngle) * radius
+      basePositions[offset + 1] = (t - 0.5) * 3.85 + (random() - 0.5) * 0.18
+      basePositions[offset + 2] = Math.sin(helixAngle) * radius
+      radii[index] = radius
+    } else {
+      const minSpread = shellSafeRadius / 0.84 + 0.05
+      const spread = minSpread + Math.pow(random(), 1.12) * 1.96
+      basePositions[offset] = Math.cos(angle) * spread
+      basePositions[offset + 1] = (random() - 0.5) * spread * 0.42
+      basePositions[offset + 2] = Math.sin(angle) * spread
+      radii[index] = spread
     }
   }
 
@@ -1515,14 +1511,13 @@ function updateParticleField(
   const clampedDelta = Math.min(delta, 1 / 24)
   const spread = collapseToCenter ? smoothstep(0.08, 0.64, intensity) : 1
   const collapse = 1 - spread
-  const baseResponse = field.profile === 'stream' ? 8.2 : 5.6
-  const smoothing = 1 - Math.exp(-(baseResponse + intensity * 3.8 + collapse * 2.2) * clampedDelta)
+  const smoothing = 1 - Math.exp(-(5.4 + intensity * 3.6 + collapse * 2.2) * clampedDelta)
+  const enforceInnerSafety = !collapseToCenter
+  const innerSafetyRadius =
+    style.kind === 'harmonic' ? style.shellScale * 1.06 + 0.05 : style.shellScale * 1.08 + 0.06
 
   for (let index = 0; index < field.count; index += 1) {
     const offset = index * 3
-    const prevX = field.positions[offset]
-    const prevY = field.positions[offset + 1]
-    const prevZ = field.positions[offset + 2]
 
     const bx = field.basePositions[offset]
     const by = field.basePositions[offset + 1]
@@ -1531,110 +1526,101 @@ function updateParticleField(
     const phase = field.phases[index]
     const speed = field.speeds[index]
     const radius = field.radii[index]
-    const band = field.bands[index]
-    const lift = field.lifts[index]
 
-    if (field.profile === 'stream') {
-      const streamAngle = band * Math.PI * 2 + phase * 0.25
-      const flow = elapsed * (0.92 + speed * 0.5) + phase * 1.6
-      const pulse = 0.82 + Math.sin(elapsed * 0.64 + phase) * 0.18 + intensity * 0.22
+    if (style.kind === 'storm') {
+      const spin = elapsed * 0.2 * speed + phase
+      const pulse = 0.8 + Math.abs(Math.sin(elapsed * 0.6 + phase)) * (0.42 + intensity * 0.5)
+      const wave = Math.sin(elapsed * 0.85 + phase) * 0.1
+      const radial = radius * pulse
 
-      let targetX = 0
-      let targetY = 0
-      let targetZ = 0
+      let targetX = Math.cos(spin) * radial + wave
+      let targetY = by * radial + Math.sin(elapsed * 0.8 + phase) * 0.16
+      let targetZ = Math.sin(spin) * radial + Math.cos(elapsed * 0.7 + phase) * 0.08
 
-      if (style.kind === 'storm') {
-        const radial = radius * pulse
-        targetX = Math.cos(flow + streamAngle) * radial + Math.sin(flow * 1.9 + lift * 2.4) * 0.16
-        targetY = Math.sin(flow * 1.2 + streamAngle * 1.5) * (0.28 + radius * 0.12) + lift * 0.4
-        targetZ = Math.sin(flow + streamAngle) * radial + Math.cos(flow * 1.6 + band * 11.0) * 0.14
-      } else if (style.kind === 'harmonic') {
-        const helixRadius = radius * (0.68 + Math.sin(flow * 1.1 + phase) * 0.18)
-        targetX = Math.cos(flow * 1.1 + streamAngle) * helixRadius + Math.sin(flow * 1.7 + lift * 3.0) * 0.12
-        targetY = Math.sin(flow * 0.84 + streamAngle * 0.9) * 0.46 + lift * 0.88 + Math.cos(flow * 0.42 + band * 7.0) * 0.42
-        targetZ = Math.sin(flow * 1.1 + streamAngle) * helixRadius + Math.cos(flow * 1.4 + phase) * 0.1
-      } else {
-        const figure = flow * 0.9 + streamAngle
-        const radial = radius * (0.78 + Math.sin(flow * 1.35 + phase) * 0.2)
-        targetX = Math.sin(figure) * radial * 1.02 + Math.sin(flow * 1.8 + lift * 2.8) * 0.1
-        targetY = Math.sin(figure * 1.55) * (0.24 + radius * 0.1) + lift * 0.42
-        targetZ = Math.sin(figure * 2.1) * radial * 0.74 + Math.cos(flow * 1.5 + phase) * 0.12
+      if (enforceInnerSafety) {
+        const length = Math.sqrt(targetX * targetX + targetY * targetY + targetZ * targetZ)
+        if (length < innerSafetyRadius) {
+          const baseLength = Math.sqrt(bx * bx + by * by + bz * bz)
+          const nx = length > 0.0001 ? targetX / length : baseLength > 0.0001 ? bx / baseLength : 1
+          const ny = length > 0.0001 ? targetY / length : baseLength > 0.0001 ? by / baseLength : 0
+          const nz = length > 0.0001 ? targetZ / length : baseLength > 0.0001 ? bz / baseLength : 0
+          const push = innerSafetyRadius - length
+          const swirl = Math.sin(elapsed * 0.72 + phase * 1.6) * push * 0.3
+
+          targetX = nx * (innerSafetyRadius + push * 0.22) - nz * swirl
+          targetY = ny * (innerSafetyRadius + push * 0.14)
+          targetZ = nz * (innerSafetyRadius + push * 0.22) + nx * swirl
+        }
       }
 
-      const finalX = targetX * spread
-      const finalY = targetY * spread
-      const finalZ = targetZ * spread
-
-      field.positions[offset] = THREE.MathUtils.lerp(prevX, finalX, smoothing)
-      field.positions[offset + 1] = THREE.MathUtils.lerp(prevY, finalY, smoothing)
-      field.positions[offset + 2] = THREE.MathUtils.lerp(prevZ, finalZ, smoothing)
-      const invDelta = 1 / Math.max(clampedDelta, 1 / 240)
-      field.velocities[offset] = THREE.MathUtils.lerp(
-        field.velocities[offset],
-        (field.positions[offset] - prevX) * invDelta,
-        0.56,
-      )
-      field.velocities[offset + 1] = THREE.MathUtils.lerp(
-        field.velocities[offset + 1],
-        (field.positions[offset + 1] - prevY) * invDelta,
-        0.56,
-      )
-      field.velocities[offset + 2] = THREE.MathUtils.lerp(
-        field.velocities[offset + 2],
-        (field.positions[offset + 2] - prevZ) * invDelta,
-        0.56,
-      )
+      field.positions[offset] = THREE.MathUtils.lerp(field.positions[offset], targetX * spread, smoothing)
+      field.positions[offset + 1] = THREE.MathUtils.lerp(field.positions[offset + 1], targetY * spread, smoothing)
+      field.positions[offset + 2] = THREE.MathUtils.lerp(field.positions[offset + 2], targetZ * spread, smoothing)
       continue
     }
 
-    const spin = elapsed * (0.16 + speed * 0.18)
-    const cos = Math.cos(spin)
-    const sin = Math.sin(spin)
-    const swirlX = bx * cos - bz * sin
-    const swirlZ = bx * sin + bz * cos
-    const breathing = 0.84 + Math.sin(elapsed * 0.58 + phase) * 0.22 + intensity * 0.16
-
-    let targetX = swirlX * breathing
-    let targetY = by * (0.78 + breathing * 0.36)
-    let targetZ = swirlZ * breathing
-
     if (style.kind === 'harmonic') {
-      targetX += Math.sin(elapsed * 1.0 + phase * 1.8) * (0.12 + radius * 0.04)
-      targetY += Math.cos(elapsed * 0.7 + phase + lift * 2.0) * 0.22
-      targetZ += Math.cos(elapsed * 0.92 + phase * 2.2) * (0.12 + radius * 0.04)
-    } else if (style.kind === 'storm') {
-      targetX += Math.sin(elapsed * 1.2 + phase * 2.1 + band * 3.2) * 0.2
-      targetY += Math.sin(elapsed * 0.86 + phase + lift) * 0.14
-      targetZ += Math.cos(elapsed * 1.16 + phase * 1.7 + band * 2.8) * 0.2
-    } else {
-      targetX += Math.sin(elapsed * 0.95 + phase * 2.0) * 0.16
-      targetY += Math.cos(elapsed * 1.02 + phase + lift * 1.8) * 0.12
-      targetZ += Math.cos(elapsed * 1.08 + phase * 1.6) * 0.16
+      const spin = elapsed * 0.58 * speed + phase
+      const baseRadius = Math.max(Math.sqrt(bx * bx + bz * bz), 0.08)
+      const wobble = Math.sin(elapsed * 1.0 + phase) * (0.12 + intensity * 0.1)
+      const drift = 0.08 + Math.sin(elapsed * 0.7 + phase) * 0.1
+
+      let targetX = Math.cos(spin) * (baseRadius + drift)
+      let targetY = by + wobble
+      let targetZ = Math.sin(spin) * (baseRadius + drift)
+
+      if (enforceInnerSafety) {
+        const length = Math.sqrt(targetX * targetX + targetY * targetY + targetZ * targetZ)
+        if (length < innerSafetyRadius) {
+          const baseLength = Math.sqrt(bx * bx + by * by + bz * bz)
+          const nx = length > 0.0001 ? targetX / length : baseLength > 0.0001 ? bx / baseLength : 1
+          const ny = length > 0.0001 ? targetY / length : baseLength > 0.0001 ? by / baseLength : 0
+          const nz = length > 0.0001 ? targetZ / length : baseLength > 0.0001 ? bz / baseLength : 0
+          const push = innerSafetyRadius - length
+          const swirl = Math.sin(elapsed * 0.66 + phase * 1.45) * push * 0.24
+
+          targetX = nx * (innerSafetyRadius + push * 0.2) - nz * swirl
+          targetY = ny * (innerSafetyRadius + push * 0.12)
+          targetZ = nz * (innerSafetyRadius + push * 0.2) + nx * swirl
+        }
+      }
+
+      field.positions[offset] = THREE.MathUtils.lerp(field.positions[offset], targetX * spread, smoothing)
+      field.positions[offset + 1] = THREE.MathUtils.lerp(field.positions[offset + 1], targetY * spread, smoothing)
+      field.positions[offset + 2] = THREE.MathUtils.lerp(field.positions[offset + 2], targetZ * spread, smoothing)
+      continue
     }
 
-    const finalX = targetX * spread
-    const finalY = targetY * spread
-    const finalZ = targetZ * spread
+    const beat = 0.84 + (Math.sin(elapsed * 0.95 + phase) * 0.5 + 0.5) * (0.42 + intensity * 0.36)
+    const spin = elapsed * 0.18 * speed
+    const cos = Math.cos(spin)
+    const sin = Math.sin(spin)
+    const sx = bx * cos - bz * sin
+    const sz = bx * sin + bz * cos
 
-    field.positions[offset] = THREE.MathUtils.lerp(prevX, finalX, smoothing)
-    field.positions[offset + 1] = THREE.MathUtils.lerp(prevY, finalY, smoothing)
-    field.positions[offset + 2] = THREE.MathUtils.lerp(prevZ, finalZ, smoothing)
-    const invDelta = 1 / Math.max(clampedDelta, 1 / 240)
-    field.velocities[offset] = THREE.MathUtils.lerp(
-      field.velocities[offset],
-      (field.positions[offset] - prevX) * invDelta,
-      0.42,
-    )
-    field.velocities[offset + 1] = THREE.MathUtils.lerp(
-      field.velocities[offset + 1],
-      (field.positions[offset + 1] - prevY) * invDelta,
-      0.42,
-    )
-    field.velocities[offset + 2] = THREE.MathUtils.lerp(
-      field.velocities[offset + 2],
-      (field.positions[offset + 2] - prevZ) * invDelta,
-      0.42,
-    )
+    let targetX = sx * beat
+    let targetY = by * (0.82 + beat * 0.34) + Math.sin(elapsed * 0.85 + phase) * 0.07
+    let targetZ = sz * beat
+
+    if (enforceInnerSafety) {
+      const length = Math.sqrt(targetX * targetX + targetY * targetY + targetZ * targetZ)
+      if (length < innerSafetyRadius) {
+        const baseLength = Math.sqrt(bx * bx + by * by + bz * bz)
+        const nx = length > 0.0001 ? targetX / length : baseLength > 0.0001 ? bx / baseLength : 1
+        const ny = length > 0.0001 ? targetY / length : baseLength > 0.0001 ? by / baseLength : 0
+        const nz = length > 0.0001 ? targetZ / length : baseLength > 0.0001 ? bz / baseLength : 0
+        const push = innerSafetyRadius - length
+        const swirl = Math.sin(elapsed * 0.74 + phase * 1.52) * push * 0.28
+
+        targetX = nx * (innerSafetyRadius + push * 0.2) - nz * swirl
+        targetY = ny * (innerSafetyRadius + push * 0.12)
+        targetZ = nz * (innerSafetyRadius + push * 0.2) + nx * swirl
+      }
+    }
+
+    field.positions[offset] = THREE.MathUtils.lerp(field.positions[offset], targetX * spread, smoothing)
+    field.positions[offset + 1] = THREE.MathUtils.lerp(field.positions[offset + 1], targetY * spread, smoothing)
+    field.positions[offset + 2] = THREE.MathUtils.lerp(field.positions[offset + 2], targetZ * spread, smoothing)
   }
 }
 
@@ -1886,6 +1872,7 @@ function ProjectNode({
 }
 
 function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOnFadeOut, prewarmActive }: HeroWorldProps) {
+  const { gl } = useThree()
   const groupRef = useRef<THREE.Group>(null)
   const coreRef = useRef<THREE.Object3D>(null)
   const coreMaskRef = useRef<THREE.Mesh>(null)
@@ -1948,7 +1935,8 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
   const simulationWarmupDoneRef = useRef(false)
 
   const style = useMemo(() => getHeroStyle(project), [project])
-  const showCoreDust = !collapseParticlesOnFadeOut
+  const showLegacySwarmOnly = false
+  const showCoreDust = !showLegacySwarmOnly
   const etherealFilaments = useMemo(() => createEtherealFilamentField(style, `${project.id}-hero-filaments`), [style, project.id])
   const wireTraceGraph = useMemo(() => createWireTraceGraph(style.shellScale), [style.shellScale])
   const streamParticles = useMemo(() => createParticleField(style, `${project.id}-hero-stream`, 'stream'), [style, project.id])
@@ -2036,6 +2024,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
     if (coreStarBlockerRef.current) {
       coreStarBlockerRef.current.visible = maskVisible
     }
+
   }, [])
 
   useEffect(() => {
@@ -2146,12 +2135,13 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
   const streamSwarmUniforms = useMemo(
     () => ({
       uTime: { value: 0 },
-      uColor: { value: accentColor.clone() },
-      uOpacity: { value: 0.28 },
-      uBaseSize: { value: style.kind === 'harmonic' ? 48 : style.kind === 'pulse' ? 50 : 46 },
+      uColor: { value: accentColor.clone().lerp(secondaryColor, 0.14) },
+      uOpacity: { value: 0.52 },
+      uBaseSize: { value: style.swarmSize * 0.84 },
+      uPixelRatio: { value: Math.min(gl.getPixelRatio(), 2) },
       uIntensity: { value: 1 },
     }),
-    [accentColor, style.kind],
+    [accentColor, secondaryColor, style.swarmSize, gl],
   )
 
   useFrame(({ clock, camera }, delta) => {
@@ -2200,9 +2190,11 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       for (let step = 0; step < warmupBatch; step += 1) {
         simulationWarmupTimeRef.current += warmupDelta
         const warmupElapsed = simulationWarmupTimeRef.current
-        updateParticleField(streamParticles, style, warmupElapsed * 0.5, warmupDelta, warmupIntensity, false)
-        updateEtherealFilamentSimulation(etherealFilaments, warmupElapsed, warmupDelta, 1, reducedMotion)
-        updateEtherealFilamentGeometry(etherealFilaments)
+        updateParticleField(streamParticles, style, warmupElapsed, warmupDelta, warmupIntensity, false)
+        if (!showLegacySwarmOnly) {
+          updateEtherealFilamentSimulation(etherealFilaments, warmupElapsed, warmupDelta, 1, reducedMotion)
+          updateEtherealFilamentGeometry(etherealFilaments)
+        }
       }
 
       if (streamPointsRef.current) {
@@ -2346,11 +2338,11 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       shellTraceCoreRef.current.scale.set(electricPulse * 0.54, tracedLength, electricPulse * 0.54)
     }
 
-    updateParticleField(streamParticles, style, elapsed * 0.5, frameDelta, intensity, collapseParticlesOnFadeOut)
+    updateParticleField(streamParticles, style, elapsed, frameDelta, intensity, collapseParticlesOnFadeOut)
 
     const collapseBlend = collapseParticlesOnFadeOut ? smoothstep(0.02, 0.8, intensity) : 1
 
-    if (streamRibbonRef.current) {
+    if (streamRibbonRef.current && !showLegacySwarmOnly) {
       updateEtherealFilamentSimulation(etherealFilaments, elapsed, frameDelta, collapseBlend, reducedMotion)
       updateEtherealFilamentGeometry(etherealFilaments)
     }
@@ -2382,18 +2374,18 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       streamRibbonMaterialRef.current.uniforms.uTime.value = elapsed
       streamRibbonMaterialRef.current.uniforms.uColor.value.copy(accentColor)
       streamRibbonMaterialRef.current.uniforms.uSecondary.value.copy(secondaryColor).lerp(accentColor, 0.2)
-      streamRibbonMaterialRef.current.uniforms.uIntensity.value = intensity * silhouetteProfile.particles
-      streamRibbonMaterialRef.current.uniforms.uOpacity.value = (0.045 + intensity * 0.14) * intensity
+      streamRibbonMaterialRef.current.uniforms.uIntensity.value = showLegacySwarmOnly ? 0 : intensity * silhouetteProfile.particles
+      streamRibbonMaterialRef.current.uniforms.uOpacity.value = showLegacySwarmOnly ? 0 : (0.045 + intensity * 0.14) * intensity
       streamRibbonMaterialRef.current.uniforms.uEmission.value = etherealFilaments.config.emissionIntensity
       streamRibbonMaterialRef.current.uniforms.uNoiseSpeed.value = etherealFilaments.config.noiseSpeed
     }
 
     if (streamSwarmMaterialRef.current) {
       streamSwarmMaterialRef.current.uniforms.uTime.value = elapsed
-      streamSwarmMaterialRef.current.uniforms.uColor.value.copy(accentColor).lerp(secondaryColor, 0.06)
-      streamSwarmMaterialRef.current.uniforms.uIntensity.value = intensity * silhouetteProfile.particles
-      streamSwarmMaterialRef.current.uniforms.uOpacity.value =
-        (0.12 + intensity * 0.36) * intensity * silhouetteProfile.particles
+      streamSwarmMaterialRef.current.uniforms.uColor.value.copy(accentColor).lerp(secondaryColor, 0.08)
+      streamSwarmMaterialRef.current.uniforms.uIntensity.value = (0.28 + intensity * 0.86) * intensity
+      streamSwarmMaterialRef.current.uniforms.uOpacity.value = (0.22 + intensity * 0.42) * intensity
+      streamSwarmMaterialRef.current.uniforms.uPixelRatio.value = Math.min(gl.getPixelRatio(), 2)
     }
 
     if (traceSegmentMaterialRef.current) {
@@ -2504,14 +2496,14 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       coreDustMaterial.uniforms.uSecondary.value.copy(accentColor).lerp(secondaryColor, 0.26)
       coreDustMaterial.uniforms.uIntensity.value = intensity * silhouetteProfile.core
       coreDustMaterial.uniforms.uRadius.value = coreDustRadius
-      coreDustMaterial.uniforms.uDensity.value = coreDustProfile.density * (0.72 + intensity * 0.9)
+      coreDustMaterial.uniforms.uDensity.value = coreDustProfile.density * (0.94 + intensity * 1.18)
       coreDustMaterial.uniforms.uDetail.value = coreDustProfile.detail * detailQuality
       coreDustMaterial.uniforms.uNoiseScale.value = coreDustProfile.noiseScale * (0.74 + detailQuality * 0.24)
       coreDustMaterial.uniforms.uNoiseSpeed.value = coreDustProfile.noiseSpeed * (reducedMotion ? 0.5 : 1)
       coreDustMaterial.uniforms.uStepCount.value = coreDustStepBudgetRef.current
       coreDustMaterial.uniforms.uFeather.value = coreDustProfile.feather
       coreDustMaterial.uniforms.uOpacity.value =
-        coreDustProfile.opacity * (0.28 + intensity * 0.5) * silhouetteProfile.core * (reducedMotion ? 0.9 : 1)
+        coreDustProfile.opacity * (0.34 + intensity * 0.62) * silhouetteProfile.core * (reducedMotion ? 0.9 : 1)
     }
 
     if (accentPrimaryMaterialRef.current) {
@@ -2914,7 +2906,13 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
         </mesh>
       </group>
 
-      <mesh ref={streamRibbonRef} geometry={etherealFilaments.geometry} renderOrder={-9} frustumCulled={false}>
+      <mesh
+        ref={streamRibbonRef}
+        geometry={etherealFilaments.geometry}
+        renderOrder={-9}
+        frustumCulled={false}
+        visible={!showLegacySwarmOnly}
+      >
         <shaderMaterial
           ref={streamRibbonMaterialRef}
           uniforms={streamRibbonUniforms}
@@ -4195,6 +4193,16 @@ function SceneContent({
     }),
     [],
   )
+  const focusTraceLineUniforms = useMemo(
+    () => ({
+      uColor: { value: FOCUS_TRACER_COLOR.clone() },
+      uOpacity: { value: 0 },
+      uHeadAtStart: { value: 0 },
+      uTailFalloff: { value: 3.6 },
+      uTipScale: { value: 1 },
+    }),
+    [],
+  )
 
   const activeProject = useMemo(
     () => (activeProjectId ? projects.find((project) => project.id === activeProjectId) ?? null : null),
@@ -4347,8 +4355,13 @@ function SceneContent({
       return 0.42
     }
 
+    if (isFocusToFocusTransition) {
+      // Keep background nodes at steady focused-state visibility during star->star swaps.
+      return 0.36
+    }
+
     return 0.36 + (1 - smoothstep(0.08, 0.62, transitionProgress)) * 0.48
-  }, [visualActiveProjectId, reducedMotion, transitionProgress])
+  }, [isFocusToFocusTransition, visualActiveProjectId, reducedMotion, transitionProgress])
 
   const fogFar = visualActiveProjectId ? 44 : 128
 
@@ -4361,6 +4374,7 @@ function SceneContent({
     color.offsetHSL(0, -0.08, 0.14)
     return `#${color.getHexString()}`
   }, [visualActiveProject])
+  const focusSwapLineColor = useMemo(() => new THREE.Color(activeConnectionColor), [activeConnectionColor])
   const neutralConnectionColor = '#5f7ba1'
   const focusSwapTracePath = useMemo<FocusSwapTracePath | null>(() => {
     if (!outgoingHeroProject || !visualActiveProject || outgoingHeroProject.id === visualActiveProject.id) {
@@ -4872,10 +4886,13 @@ function SceneContent({
           {focusSwapTraceState.baseOpacity > 0.003 && (
             <mesh position={focusSwapTraceState.renderedMidpoint} quaternion={focusSwapTracePath.quaternion} renderOrder={-19}>
               <cylinderGeometry args={[0.014, 0.014, focusSwapTraceState.renderedLength, 10, 1, true]} />
-              <meshBasicMaterial
-                color={activeConnectionColor}
+              <shaderMaterial
+                uniforms={focusTraceLineUniforms}
+                uniforms-uColor-value={focusSwapLineColor}
+                uniforms-uOpacity-value={focusSwapTraceState.baseOpacity}
+                vertexShader={TRACER_VERTEX_SHADER}
+                fragmentShader={TRACER_FRAGMENT_SHADER}
                 transparent
-                opacity={focusSwapTraceState.baseOpacity}
                 depthWrite={false}
                 depthTest
                 blending={THREE.NormalBlending}
@@ -4926,11 +4943,15 @@ function SceneContent({
       )}
 
       {projects.map((project, projectIndex) => {
+        const suppressOutgoingLowFiNode =
+          isFocusToFocusTransition && outgoingHeroProjectId !== null && project.id === outgoingHeroProjectId
+        const isNodeActive = project.id === nodeActiveProjectId || suppressOutgoingLowFiNode
+
         return (
         <ProjectNode
           key={project.id}
           project={project}
-          isActive={project.id === nodeActiveProjectId}
+          isActive={isNodeActive}
           isHovered={project.id === hoveredProjectId}
           mapVisibility={mapVisibility}
           nodeDisplayMode={!visualActiveProjectId ? 'neutral' : 'background'}

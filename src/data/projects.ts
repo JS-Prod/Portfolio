@@ -36,7 +36,7 @@ export const projects: Project[] = [
     theme: 'Generative simulation',
     stack: ['React Three Fiber', 'Three.js', 'GPGPU', 'GLSL', 'TypeScript'],
     coordinates: [-2.6, 1.1, -1.8],
-    color: '#addfff',
+    color: '#7ec8ff',
   },
   {
     id: 'voyce',
@@ -58,7 +58,7 @@ export const projects: Project[] = [
     theme: 'Voice infrastructure',
     stack: ['Next.js', 'Node.js', 'WebSockets', 'Twilio', 'Vertex AI (STT/TTS/LLM)'],
     coordinates: [0.45, -0.7, 1.6],
-    color: '#b7f1e1',
+    color: '#93f6d8',
   },
   {
     id: 'tone-tap',
@@ -79,6 +79,6 @@ export const projects: Project[] = [
     theme: 'Interactive audio gameplay',
     stack: ['React Native', 'Node.js', 'Express', 'Google Play'],
     coordinates: [2.7, 0.9, -0.5],
-    color: '#ffd8b5',
+    color: '#ffbd85',
   },
 ]
