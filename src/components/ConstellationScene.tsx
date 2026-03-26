@@ -725,6 +725,42 @@ void main() {
 }
 `
 
+const TRACER_VERTEX_SHADER = `
+uniform float uHeadAtStart;
+uniform float uTipScale;
+
+varying vec2 vUv;
+
+void main() {
+  vUv = uv;
+  float along = uHeadAtStart > 0.5 ? uv.y : (1.0 - uv.y);
+  float taper = mix(uTipScale, 1.0, smoothstep(0.0, 1.0, along));
+  vec3 transformed = position;
+  transformed.xz *= taper;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(transformed, 1.0);
+}
+`
+
+const TRACER_FRAGMENT_SHADER = `
+uniform vec3 uColor;
+uniform float uOpacity;
+uniform float uHeadAtStart;
+uniform float uTailFalloff;
+
+varying vec2 vUv;
+
+void main() {
+  float along = uHeadAtStart > 0.5 ? vUv.y : (1.0 - vUv.y);
+  float alpha = uOpacity * exp(-along * uTailFalloff);
+  gl_FragColor = vec4(uColor, alpha);
+}
+`
+
+const INTRO_TRACER_COLOR = new THREE.Color('#e8f2ff')
+const INTRO_TRACER_CORONA_COLOR = new THREE.Color('#a3ccff')
+const FOCUS_TRACER_COLOR = INTRO_TRACER_COLOR.clone()
+const FOCUS_TRACER_CORONA_COLOR = INTRO_TRACER_CORONA_COLOR.clone()
+
 function getHash(seed: string): number {
   let hash = 0
 
@@ -3879,8 +3915,30 @@ function IntroConnectionSegment({
 }: IntroConnectionSegmentProps) {
   const lineMeshRef = useRef<THREE.Mesh>(null)
   const lineMaterialRef = useRef<THREE.MeshBasicMaterial>(null)
-  const tracerMeshRef = useRef<THREE.Mesh>(null)
-  const tracerMaterialRef = useRef<THREE.MeshBasicMaterial>(null)
+  const tracerCoreMeshRef = useRef<THREE.Mesh>(null)
+  const tracerCoreMaterialRef = useRef<THREE.ShaderMaterial>(null)
+  const tracerCoronaMeshRef = useRef<THREE.Mesh>(null)
+  const tracerCoronaMaterialRef = useRef<THREE.ShaderMaterial>(null)
+  const tracerCoreUniforms = useMemo(
+    () => ({
+      uColor: { value: INTRO_TRACER_COLOR.clone() },
+      uOpacity: { value: 0 },
+      uHeadAtStart: { value: reverseTracer ? 1 : 0 },
+      uTailFalloff: { value: 4.9 },
+      uTipScale: { value: 0.2 },
+    }),
+    [reverseTracer],
+  )
+  const tracerCoronaUniforms = useMemo(
+    () => ({
+      uColor: { value: INTRO_TRACER_CORONA_COLOR.clone() },
+      uOpacity: { value: 0 },
+      uHeadAtStart: { value: reverseTracer ? 1 : 0 },
+      uTailFalloff: { value: 3.2 },
+      uTipScale: { value: 0.18 },
+    }),
+    [reverseTracer],
+  )
   const lineCenterRef = useMemo(() => new THREE.Vector3(), [])
   const tracerCenterRef = useMemo(() => new THREE.Vector3(), [])
 
@@ -3910,21 +3968,24 @@ function IntroConnectionSegment({
 
   useFrame(() => {
     const lineMesh = lineMeshRef.current
-    const tracerMesh = tracerMeshRef.current
+    const tracerCoreMesh = tracerCoreMeshRef.current
+    const tracerCoronaMesh = tracerCoronaMeshRef.current
     const lineMaterial = lineMaterialRef.current
-    const tracerMaterial = tracerMaterialRef.current
+    const tracerCoreMaterial = tracerCoreMaterialRef.current
+    const tracerCoronaMaterial = tracerCoronaMaterialRef.current
 
-    if (!lineMesh || !tracerMesh || !lineMaterial || !tracerMaterial) {
+    if (!lineMesh || !tracerCoreMesh || !tracerCoronaMesh || !lineMaterial || !tracerCoreMaterial || !tracerCoronaMaterial) {
       return
     }
 
     const introProgress = introSequenceActive ? introRevealProgressRef.current : 1
-    const lineReveal = introSequenceActive
+    const lineRevealLinear = introSequenceActive
       ? clamp01(
           (introProgress - connectionIndex * (0.045 / INTRO_CONNECTION_SPEED_MULTIPLIER)) /
             (0.42 / INTRO_CONNECTION_SPEED_MULTIPLIER),
         )
       : 1
+    const lineReveal = introSequenceActive ? easeInOutCubic(lineRevealLinear) : 1
     const renderedLength = Math.max(0.001, connection.length * lineReveal)
 
     if (introSequenceActive) {
@@ -3939,9 +4000,12 @@ function IntroConnectionSegment({
     lineMaterial.opacity = lineBaseOpacity * (introSequenceActive ? lineReveal : 1)
 
     if (!introSequenceActive) {
-      tracerMesh.position.copy(midpoint)
-      tracerMesh.scale.set(1, 0.001, 1)
-      tracerMaterial.opacity = 0
+      tracerCoreMesh.position.copy(midpoint)
+      tracerCoreMesh.scale.set(1, 0.001, 1)
+      tracerCoreMaterial.uniforms.uOpacity.value = 0
+      tracerCoronaMesh.position.copy(midpoint)
+      tracerCoronaMesh.scale.set(2.2, 0.001, 2.2)
+      tracerCoronaMaterial.uniforms.uOpacity.value = 0
       return
     }
 
@@ -3952,25 +4016,37 @@ function IntroConnectionSegment({
         )
       : 0
     const tracerDistance = THREE.MathUtils.lerp(0, connection.length, tracerProgressLinear)
-    const tracerMaxLength = Math.min(0.4, Math.max(0.14, connection.length * 0.14))
+    const tracerMaxLength = Math.min(0.82, Math.max(0.3, connection.length * 0.25))
     const halfMax = tracerMaxLength * 0.5
     const halfBoundary = Math.max(0, Math.min(tracerDistance, connection.length - tracerDistance))
     const tracerHalf = Math.min(halfMax, halfBoundary)
 
     if (tracerHalf <= 0.0005) {
-      tracerMesh.position.copy(midpoint)
-      tracerMesh.scale.set(1, 0.001, 1)
-      tracerMaterial.opacity = 0
+      tracerCoreMesh.position.copy(midpoint)
+      tracerCoreMesh.scale.set(1, 0.001, 1)
+      tracerCoreMaterial.uniforms.uOpacity.value = 0
+      tracerCoronaMesh.position.copy(midpoint)
+      tracerCoronaMesh.scale.set(2.2, 0.001, 2.2)
+      tracerCoronaMaterial.uniforms.uOpacity.value = 0
       return
     }
 
     const tracerLength = Math.max(0.002, tracerHalf * 2)
-    const tracerCenterDistanceDirected = reverseTracer ? connection.length - tracerDistance : tracerDistance
+    const tracerHeadDistanceDirected = reverseTracer ? connection.length - tracerDistance : tracerDistance
+    const tracerCenterDistanceDirected = reverseTracer
+      ? tracerHeadDistanceDirected + tracerLength * 0.5
+      : tracerHeadDistanceDirected - tracerLength * 0.5
+    const tracerCenterDistance = THREE.MathUtils.clamp(tracerCenterDistanceDirected, 0, connection.length)
+    const tracerEnvelope = halfMax <= 0 ? 0 : smoothstep(0, 1, tracerHalf / halfMax)
+    const tracerOpacity = tracerEnvelope
 
-    tracerCenterRef.copy(start).addScaledVector(direction, tracerCenterDistanceDirected)
-    tracerMesh.position.copy(tracerCenterRef)
-    tracerMesh.scale.set(1, tracerLength, 1)
-    tracerMaterial.opacity = halfMax <= 0 ? 0 : 0.94 * smoothstep(0, 1, tracerHalf / halfMax)
+    tracerCenterRef.copy(start).addScaledVector(direction, tracerCenterDistance)
+    tracerCoreMesh.position.copy(tracerCenterRef)
+    tracerCoreMesh.scale.set(1, tracerLength, 1)
+    tracerCoreMaterial.uniforms.uOpacity.value = tracerOpacity
+    tracerCoronaMesh.position.copy(tracerCenterRef)
+    tracerCoronaMesh.scale.set(2.9, tracerLength, 2.9)
+    tracerCoronaMaterial.uniforms.uOpacity.value = tracerOpacity * 0.2
   })
 
   return (
@@ -3989,13 +4065,29 @@ function IntroConnectionSegment({
         />
       </mesh>
 
-      <mesh ref={tracerMeshRef} position={connection.midpoint} quaternion={connection.quaternion} renderOrder={-19}>
-        <cylinderGeometry args={[0.018, 0.018, 1, 10, 1, true]} />
-        <meshBasicMaterial
-          ref={tracerMaterialRef}
-          color="#d9ecff"
+      <mesh ref={tracerCoronaMeshRef} position={connection.midpoint} quaternion={connection.quaternion} renderOrder={-18}>
+        <cylinderGeometry args={[0.05, 0.05, 1, 12, 1, true]} />
+        <shaderMaterial
+          ref={tracerCoronaMaterialRef}
+          uniforms={tracerCoronaUniforms}
+          vertexShader={TRACER_VERTEX_SHADER}
+          fragmentShader={TRACER_FRAGMENT_SHADER}
           transparent
-          opacity={0}
+          depthWrite={false}
+          depthTest
+          blending={THREE.AdditiveBlending}
+          toneMapped={false}
+        />
+      </mesh>
+
+      <mesh ref={tracerCoreMeshRef} position={connection.midpoint} quaternion={connection.quaternion} renderOrder={-17}>
+        <cylinderGeometry args={[0.05, 0.05, 1, 12, 1, true]} />
+        <shaderMaterial
+          ref={tracerCoreMaterialRef}
+          uniforms={tracerCoreUniforms}
+          vertexShader={TRACER_VERTEX_SHADER}
+          fragmentShader={TRACER_FRAGMENT_SHADER}
+          transparent
           depthWrite={false}
           depthTest
           blending={THREE.AdditiveBlending}
@@ -4083,6 +4175,26 @@ function SceneContent({
 
     return topmost.id
   }, [connectionVisuals])
+  const focusTracerCoreUniforms = useMemo(
+    () => ({
+      uColor: { value: FOCUS_TRACER_COLOR.clone() },
+      uOpacity: { value: 0 },
+      uHeadAtStart: { value: 0 },
+      uTailFalloff: { value: 4.9 },
+      uTipScale: { value: 0.2 },
+    }),
+    [],
+  )
+  const focusTracerCoronaUniforms = useMemo(
+    () => ({
+      uColor: { value: FOCUS_TRACER_CORONA_COLOR.clone() },
+      uOpacity: { value: 0 },
+      uHeadAtStart: { value: 0 },
+      uTailFalloff: { value: 3.2 },
+      uTipScale: { value: 0.18 },
+    }),
+    [],
+  )
 
   const activeProject = useMemo(
     () => (activeProjectId ? projects.find((project) => project.id === activeProjectId) ?? null : null),
@@ -4275,32 +4387,40 @@ function SceneContent({
     }
 
     const lineReveal = smoothstep(0.0, 0.42, transitionProgress)
-    const renderedLength = Math.max(0.001, focusSwapTracePath.length * lineReveal)
-    const renderedMidpoint = focusSwapTracePath.start.clone().addScaledVector(focusSwapTracePath.direction, renderedLength * 0.5)
     const transferProgress = clamp01((transitionProgress - 0.02) / 0.48)
     const tracerProgress = smoothstep(0, 1, transferProgress)
     const tracerDistance = THREE.MathUtils.lerp(0, focusSwapTracePath.length, tracerProgress)
-    const tracerMaxLength = Math.min(0.62, Math.max(0.24, focusSwapTracePath.length * 0.2))
+    const tracerMaxLength = Math.min(0.56, Math.max(0.2, focusSwapTracePath.length * 0.18))
     const halfMax = tracerMaxLength * 0.5
     const halfBoundary = Math.max(0, Math.min(tracerDistance, focusSwapTracePath.length - tracerDistance))
     const tracerHalf = Math.min(halfMax, halfBoundary)
     const tracerLength = Math.max(0.002, tracerHalf * 2)
     const tracerCenter = focusSwapTracePath.start.clone().addScaledVector(focusSwapTracePath.direction, tracerDistance)
-    const fade = 1 - smoothstep(0.66, 0.9, transitionProgress)
+    const lineRevealDistance = focusSwapTracePath.length * lineReveal
+    const lineHeadDistance = Math.min(lineRevealDistance, tracerDistance + tracerLength * 0.45 + 0.08)
+    const lineTrailWindow = Math.min(1.9, Math.max(0.62, focusSwapTracePath.length * 0.38))
+    const lineTailDistance = Math.max(0, lineHeadDistance - lineTrailWindow)
+    const renderedLength = Math.max(0.001, lineHeadDistance - lineTailDistance)
+    const renderedMidpoint = focusSwapTracePath.start
+      .clone()
+      .addScaledVector(focusSwapTracePath.direction, lineTailDistance + renderedLength * 0.5)
+    const lineFade = 1 - smoothstep(0.66, 0.9, transitionProgress)
     const tracerEnvelope = halfMax <= 0 ? 0 : smoothstep(0.0, 0.9, tracerHalf / halfMax)
+    const tracerBirth = smoothstep(0.0, 0.08, transitionProgress)
+    const tracerSink = 1 - smoothstep(0.9, 1.0, tracerProgress)
+    const baseTrailFade = 1 - smoothstep(0.74, 1.0, tracerProgress)
 
     return {
       renderedMidpoint: [renderedMidpoint.x, renderedMidpoint.y, renderedMidpoint.z],
       renderedLength,
       tracerCenter: [tracerCenter.x, tracerCenter.y, tracerCenter.z],
       tracerLength,
-      baseOpacity: 0.46 * fade,
-      tracerOpacity: 0.94 * fade * tracerEnvelope,
+      baseOpacity: 0.44 * lineFade * baseTrailFade,
+      tracerOpacity: 0.98 * tracerEnvelope * tracerBirth * tracerSink,
     }
   }, [focusSwapTracePath, isFocusToFocusTransition, transitionProgress])
   const introSequenceActive = !reducedMotion && !visualActiveProjectId && !introComplete
   const introRevealActive = introSequenceActive && introUnlocked
-  const hideIntroConnectionsDuringBootstrap = introSequenceActive && !introUnlocked
   const heroPrewarmActive = !introUnlocked && !reducedMotion && activeProjectId === null
   const shouldMountHeroWorlds = heroWorldsMounted || visualActiveProjectId !== null || outgoingHeroProjectId !== null
 
@@ -4728,16 +4848,12 @@ function SceneContent({
         const linkedToSelection =
           visualActiveProjectId === null ? showAllConnections || linkedToHover : focusedHoverConnection
 
-      if (!linkedToSelection) {
-        return null
-      }
+        if (!linkedToSelection) {
+          return null
+        }
 
-      if (hideIntroConnectionsDuringBootstrap) {
-        return null
-      }
-
-      return (
-        <IntroConnectionSegment
+        return (
+          <IntroConnectionSegment
             key={connection.id}
             connection={connection}
             connectionIndex={connectionIndex}
@@ -4769,18 +4885,42 @@ function SceneContent({
           )}
 
           {focusSwapTraceState.tracerOpacity > 0.003 && (
-            <mesh position={focusSwapTraceState.tracerCenter} quaternion={focusSwapTracePath.quaternion} renderOrder={-18}>
-              <cylinderGeometry args={[0.021, 0.021, focusSwapTraceState.tracerLength, 12, 1, true]} />
-              <meshBasicMaterial
-                color="#d9ecff"
-                transparent
-                opacity={focusSwapTraceState.tracerOpacity}
-                depthWrite={false}
-                depthTest
-                blending={THREE.AdditiveBlending}
-                toneMapped={false}
-              />
-            </mesh>
+            <>
+              <mesh
+                position={focusSwapTraceState.tracerCenter}
+                quaternion={focusSwapTracePath.quaternion}
+                scale={[2.9, 1, 2.9]}
+                renderOrder={-18}
+              >
+                <cylinderGeometry args={[0.05, 0.05, focusSwapTraceState.tracerLength, 12, 1, true]} />
+                <shaderMaterial
+                  uniforms={focusTracerCoronaUniforms}
+                  uniforms-uOpacity-value={focusSwapTraceState.tracerOpacity * 0.2}
+                  vertexShader={TRACER_VERTEX_SHADER}
+                  fragmentShader={TRACER_FRAGMENT_SHADER}
+                  transparent
+                  depthWrite={false}
+                  depthTest
+                  blending={THREE.AdditiveBlending}
+                  toneMapped={false}
+                />
+              </mesh>
+
+              <mesh position={focusSwapTraceState.tracerCenter} quaternion={focusSwapTracePath.quaternion} renderOrder={-17}>
+                <cylinderGeometry args={[0.05, 0.05, focusSwapTraceState.tracerLength, 12, 1, true]} />
+                <shaderMaterial
+                  uniforms={focusTracerCoreUniforms}
+                  uniforms-uOpacity-value={focusSwapTraceState.tracerOpacity}
+                  vertexShader={TRACER_VERTEX_SHADER}
+                  fragmentShader={TRACER_FRAGMENT_SHADER}
+                  transparent
+                  depthWrite={false}
+                  depthTest
+                  blending={THREE.AdditiveBlending}
+                  toneMapped={false}
+                />
+              </mesh>
+            </>
           )}
         </group>
       )}
