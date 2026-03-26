@@ -389,12 +389,25 @@ float densityField(
   vec3 lateralToWind = q - windPrimary * alongWind;
   float jetWidth = 0.12;
   float jetCore = exp(-dot(lateralToWind, lateralToWind) / max(jetWidth * jetWidth, 1e-4));
+  float radialLen = length(lateralToWind);
+  vec3 tangential = cross(windPrimary, lateralToWind);
+  float tangentialLen = length(tangential);
+  if (tangentialLen > 0.0001) {
+    tangential /= tangentialLen;
+  } else {
+    tangential = faceDir;
+  }
+  float swirlBand = sin(t * 0.16 + radialLen * 7.0 + alongWind * 3.6);
+  float swirlShell = smoothstep(0.0, 0.76, radialLen) * (0.34 + nearShell * 0.66);
+  float spiralBand = sin(t * 0.11 + radialLen * 5.2 - alongWind * 2.4);
 
   vec3 flow = q * noiseScale;
   flow += windPrimary * (t * (0.045 + jetCore * 0.085));
   flow -= windSecondary * (t * 0.04);
   flow += shearDir * (t * 0.24) * nearShell;
   flow += shearDir * dot(q, shearDir) * nearShell * 0.58;
+  flow += tangential * swirlBand * (0.16 + detailGain * 0.08) * swirlShell;
+  flow += faceDir * spiralBand * (0.08 + nearShell * 0.15);
 
   float warp = fbm3Low(flow * 1.25 + vec3(5.1, 2.3, 1.7)) - 0.5;
   flow += windSecondary * warp * (0.9 + detailGain * 0.28);
@@ -403,6 +416,8 @@ float densityField(
     sin((q.z - warp) * 1.9 - t * 0.03),
     sin((q.x + warp) * 2.0 + t * 0.028)
   ) * 0.18;
+  float vortexNoise = fbm3Low(flow * 0.92 + vec3(2.4, 7.9, 1.3)) - 0.5;
+  flow += tangential * vortexNoise * (0.22 + nearShell * 0.18);
 
   float base = fbm3(flow * 1.12 + vec3(0.0, t * 0.03, 0.0));
   float detail = fbm3Low(flow * 2.35 + vec3(6.8, 3.3, 4.2));
@@ -991,9 +1006,9 @@ const CORE_DUST_PRESETS: Record<HeroKind, CoreDustProfile> = {
     density: 3.4,
     detail: 0.92,
     noiseScale: 1.78,
-    noiseSpeed: 0.05,
+    noiseSpeed: 0.082,
     opacity: 0.74,
-    windTempo: 0.02,
+    windTempo: 0.036,
     feather: 0.2,
     stepCount: 44,
     phaseOffset: 0.45,
@@ -1003,9 +1018,9 @@ const CORE_DUST_PRESETS: Record<HeroKind, CoreDustProfile> = {
     density: 3.1,
     detail: 0.82,
     noiseScale: 1.66,
-    noiseSpeed: 0.045,
+    noiseSpeed: 0.074,
     opacity: 0.68,
-    windTempo: 0.018,
+    windTempo: 0.032,
     feather: 0.22,
     stepCount: 40,
     phaseOffset: 1.05,
@@ -1015,9 +1030,9 @@ const CORE_DUST_PRESETS: Record<HeroKind, CoreDustProfile> = {
     density: 3.25,
     detail: 0.88,
     noiseScale: 1.7,
-    noiseSpeed: 0.048,
+    noiseSpeed: 0.078,
     opacity: 0.72,
-    windTempo: 0.019,
+    windTempo: 0.034,
     feather: 0.21,
     stepCount: 42,
     phaseOffset: 1.6,
@@ -1913,6 +1928,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
   const coreDustWindSecondaryTargetWorldRef = useMemo(() => new THREE.Vector3(), [])
   const coreDustWindPrimaryLocalRef = useMemo(() => new THREE.Vector3(), [])
   const coreDustWindSecondaryLocalRef = useMemo(() => new THREE.Vector3(), [])
+  const coreDustWindSpinAxisRef = useMemo(() => new THREE.Vector3(), [])
   const coreDustLightWorldRef = useMemo(() => new THREE.Vector3(), [])
   const coreDustLightLocalRef = useMemo(() => new THREE.Vector3(), [])
   const coreDustWorldPosRef = useMemo(() => new THREE.Vector3(), [])
@@ -2244,8 +2260,9 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       shellRef.current.rotation.z += frameDelta * (reducedMotion ? 0.021 : 0.066)
     }
 
-    if (showCoreDust && shellRef.current && coreDustGroupRef.current) {
-      coreDustGroupRef.current.rotation.copy(shellRef.current.rotation)
+    if (showCoreDust && coreDustGroupRef.current) {
+      // Keep volumetric fog independent from shell spin.
+      coreDustGroupRef.current.rotation.set(0, 0, 0)
       const cloudPulse =
         1 +
         Math.sin(elapsed * 0.52 + (style.kind === 'harmonic' ? 0.8 : style.kind === 'pulse' ? 1.4 : 0.2)) *
@@ -2410,7 +2427,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
         coreDustWindSecondaryTargetWorldRef.lengthSq() < 0.0001
       ) {
         const holdScale = THREE.MathUtils.clamp(0.02 / Math.max(0.001, coreDustProfile.windTempo), 0.8, 1.45)
-        const holdDuration = ((reducedMotion ? 20 : 12) + random() * (reducedMotion ? 16 : 10)) * holdScale
+        const holdDuration = ((reducedMotion ? 16 : 8) + random() * (reducedMotion ? 12 : 7)) * holdScale
         coreDustNextRetargetRef.current = elapsed + holdDuration
 
         coreDustWindPrimaryTargetWorldRef.set(random() * 2 - 1, (random() * 2 - 1) * 0.22, random() * 2 - 1)
@@ -2438,7 +2455,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       }
 
       const holdScale = THREE.MathUtils.clamp(0.02 / Math.max(0.001, coreDustProfile.windTempo), 0.8, 1.45)
-      const windLerp = 1 - Math.exp(-((reducedMotion ? 0.22 : 0.16) / holdScale) * frameDelta)
+      const windLerp = 1 - Math.exp(-((reducedMotion ? 0.28 : 0.24) / holdScale) * frameDelta)
 
       if (coreDustWindPrimaryWorldRef.lengthSq() < 0.0001) {
         coreDustWindPrimaryWorldRef.copy(coreDustWindPrimaryTargetWorldRef)
@@ -2451,6 +2468,24 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       } else {
         coreDustWindSecondaryWorldRef.lerp(coreDustWindSecondaryTargetWorldRef, windLerp).normalize()
       }
+
+      // Keep wind continuously rotating so cloud motion swirls instead of only drifting between retargets.
+      coreDustWindSpinAxisRef
+        .set(
+          Math.sin(elapsed * 0.19 + coreDustProfile.phaseOffset),
+          Math.cos(elapsed * 0.14 + coreDustProfile.phaseOffset * 0.7) * 0.45,
+          Math.sin(elapsed * 0.23 + 1.4 + coreDustProfile.phaseOffset * 1.1),
+        )
+        .normalize()
+      const spinAngle = frameDelta * (reducedMotion ? 0.05 : 0.11)
+      coreDustWindPrimaryWorldRef.applyAxisAngle(coreDustWindSpinAxisRef, spinAngle).normalize()
+      coreDustWindSecondaryWorldRef.applyAxisAngle(coreDustWindSpinAxisRef, spinAngle * 0.86)
+      coreDustWindSecondaryWorldRef
+        .addScaledVector(
+          coreDustWindPrimaryWorldRef,
+          -coreDustWindSecondaryWorldRef.dot(coreDustWindPrimaryWorldRef),
+        )
+        .normalize()
 
       const windAlignment = Math.abs(coreDustWindPrimaryWorldRef.dot(coreDustWindSecondaryWorldRef))
       if (windAlignment > 0.9) {
@@ -2496,14 +2531,14 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       coreDustMaterial.uniforms.uSecondary.value.copy(accentColor).lerp(secondaryColor, 0.26)
       coreDustMaterial.uniforms.uIntensity.value = intensity * silhouetteProfile.core
       coreDustMaterial.uniforms.uRadius.value = coreDustRadius
-      coreDustMaterial.uniforms.uDensity.value = coreDustProfile.density * (0.94 + intensity * 1.18)
+      coreDustMaterial.uniforms.uDensity.value = coreDustProfile.density * (0.94 + intensity * 1.18) * 0.72
       coreDustMaterial.uniforms.uDetail.value = coreDustProfile.detail * detailQuality
       coreDustMaterial.uniforms.uNoiseScale.value = coreDustProfile.noiseScale * (0.74 + detailQuality * 0.24)
       coreDustMaterial.uniforms.uNoiseSpeed.value = coreDustProfile.noiseSpeed * (reducedMotion ? 0.5 : 1)
       coreDustMaterial.uniforms.uStepCount.value = coreDustStepBudgetRef.current
       coreDustMaterial.uniforms.uFeather.value = coreDustProfile.feather
       coreDustMaterial.uniforms.uOpacity.value =
-        coreDustProfile.opacity * (0.34 + intensity * 0.62) * silhouetteProfile.core * (reducedMotion ? 0.9 : 1)
+        coreDustProfile.opacity * (0.34 + intensity * 0.62) * 0.72 * silhouetteProfile.core * (reducedMotion ? 0.9 : 1)
     }
 
     if (accentPrimaryMaterialRef.current) {
