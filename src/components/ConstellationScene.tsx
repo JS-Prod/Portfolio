@@ -659,10 +659,10 @@ void main() {
     discard;
   }
 
-  float core = exp(-distanceSquared * 9.8);
-  float halo = exp(-distanceSquared * 4.2);
-  float edge = smoothstep(1.0, 0.0, distanceSquared);
-  float glow = (core * 0.88 + halo * 0.12) * edge * (0.52 + vPulse * 0.48) * (0.62 + vDepthFade * 0.38);
+  float core = exp(-distanceSquared * 12.6);
+  float halo = exp(-distanceSquared * 6.4);
+  float edge = pow(smoothstep(1.0, 0.0, distanceSquared), 1.22);
+  float glow = (core * 0.94 + halo * 0.06) * edge * (0.52 + vPulse * 0.48) * (0.62 + vDepthFade * 0.38);
   vec3 color = uColor * (0.74 + vPulse * 0.2);
 
   gl_FragColor = vec4(color, glow * uOpacity);
@@ -2136,7 +2136,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
     () => ({
       uTime: { value: 0 },
       uColor: { value: accentColor.clone().lerp(secondaryColor, 0.14) },
-      uOpacity: { value: 0.52 },
+      uOpacity: { value: 0.46 },
       uBaseSize: { value: style.swarmSize * 0.84 },
       uPixelRatio: { value: Math.min(gl.getPixelRatio(), 2) },
       uIntensity: { value: 1 },
@@ -2384,7 +2384,7 @@ function HeroWorld({ project, reducedMotion, presenceTarget, collapseParticlesOn
       streamSwarmMaterialRef.current.uniforms.uTime.value = elapsed
       streamSwarmMaterialRef.current.uniforms.uColor.value.copy(accentColor).lerp(secondaryColor, 0.08)
       streamSwarmMaterialRef.current.uniforms.uIntensity.value = (0.28 + intensity * 0.86) * intensity
-      streamSwarmMaterialRef.current.uniforms.uOpacity.value = (0.22 + intensity * 0.42) * intensity
+      streamSwarmMaterialRef.current.uniforms.uOpacity.value = (0.18 + intensity * 0.34) * intensity
       streamSwarmMaterialRef.current.uniforms.uPixelRatio.value = Math.min(gl.getPixelRatio(), 2)
     }
 
@@ -3024,29 +3024,29 @@ function CinematicBloom({ project, reducedMotion }: CinematicBloomProps) {
 
     if (!project) {
       bloomPass.strength = reducedMotion ? 0.46 : 0.58
-      bloomPass.radius = 0.44
-      bloomPass.threshold = 0.46
+      bloomPass.radius = 0.4
+      bloomPass.threshold = 0.48
       rgbUniforms.amount.value = 0.00008
       vignetteUniforms.darkness.value = 0.9
       filmUniforms.nIntensity.value = reducedMotion ? 0.0006 : 0.0016
     } else if (project.id === 'gpgpu-particles') {
       bloomPass.strength = reducedMotion ? 0.54 : 0.68
-      bloomPass.radius = 0.56
-      bloomPass.threshold = 0.39
+      bloomPass.radius = 0.52
+      bloomPass.threshold = 0.41
       rgbUniforms.amount.value = 0.00014
       vignetteUniforms.darkness.value = 1.04
       filmUniforms.nIntensity.value = reducedMotion ? 0.0015 : 0.0038
     } else if (project.id === 'voyce') {
       bloomPass.strength = reducedMotion ? 0.48 : 0.6
-      bloomPass.radius = 0.52
-      bloomPass.threshold = 0.41
+      bloomPass.radius = 0.48
+      bloomPass.threshold = 0.43
       rgbUniforms.amount.value = 0.00012
       vignetteUniforms.darkness.value = 1.04
       filmUniforms.nIntensity.value = reducedMotion ? 0.0014 : 0.0034
     } else {
       bloomPass.strength = reducedMotion ? 0.52 : 0.64
-      bloomPass.radius = 0.54
-      bloomPass.threshold = 0.4
+      bloomPass.radius = 0.5
+      bloomPass.threshold = 0.42
       rgbUniforms.amount.value = 0.00013
       vignetteUniforms.darkness.value = 1.05
       filmUniforms.nIntensity.value = reducedMotion ? 0.0015 : 0.0036
@@ -5039,7 +5039,7 @@ export function ConstellationScene(props: ConstellationSceneProps) {
       gl={{ antialias: true, alpha: false, stencil: true, powerPreference: 'high-performance' }}
       onCreated={({ gl }) => {
         gl.toneMapping = THREE.ACESFilmicToneMapping
-        gl.toneMappingExposure = 1.5
+        gl.toneMappingExposure = 1.56
       }}
       fallback={<div className="canvas-fallback">WebGL unavailable.</div>}
     >
