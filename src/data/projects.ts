@@ -79,6 +79,6 @@ export const projects: Project[] = [
     theme: 'Interactive audio gameplay',
     stack: ['React Native', 'Node.js', 'Express', 'Google Play'],
     coordinates: [2.7, 0.9, -0.5],
-    color: '#ffbd85',
+    color: '#ffc792',
   },
 ]
