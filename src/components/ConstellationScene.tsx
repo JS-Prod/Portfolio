@@ -3351,7 +3351,7 @@ function HeroWorld({
         />
       </mesh>
 
-      <group ref={coreRef} scale={style.shellScale * 0.36}>
+      <group ref={coreRef} scale={style.shellScale * 0.45}>
         <mesh renderOrder={-12}>
           <HeroCoreGeometry kind={style.kind} />
           <shaderMaterial
