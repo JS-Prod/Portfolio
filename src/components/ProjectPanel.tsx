@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 import type { Project } from '../data/projects'
 
@@ -12,14 +12,34 @@ type InsightTab = {
   key: InsightTabKey
   label: string
   content: string
-  actionLabel?: string
-  actionHref?: string
+}
+
+function toVisibleUrl(href: string): string {
+  if (typeof window === 'undefined') {
+    return href
+  }
+
+  try {
+    return new URL(href, window.location.href).toString()
+  } catch {
+    return href
+  }
+}
+
+function isExternalHref(href: string): boolean {
+  if (typeof window === 'undefined') {
+    return /^https?:\/\//.test(href)
+  }
+
+  try {
+    return new URL(href, window.location.href).origin !== window.location.origin
+  } catch {
+    return false
+  }
 }
 
 export function ProjectPanel({ project }: ProjectPanelProps) {
   const [activeTab, setActiveTab] = useState<InsightTabKey>('demo')
-  const insightPanelRef = useRef<HTMLDivElement>(null)
-  const tabsRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     setActiveTab('demo')
@@ -35,51 +55,25 @@ export function ProjectPanel({ project }: ProjectPanelProps) {
         key: 'demo',
         label: 'Demo',
         content: project.demoNote,
-        actionLabel: project.demoLabel,
-        actionHref: project.demoUrl,
       },
-      { key: 'contribution', label: 'Contribution', content: project.contribution },
-      { key: 'approach', label: 'Approach', content: project.approach },
-      { key: 'impact', label: 'Impact', content: project.impact },
+      { key: 'contribution', label: 'Role', content: project.contribution },
+      { key: 'approach', label: 'Decisions', content: project.approach },
+      { key: 'impact', label: 'Results', content: project.impact },
     ]
   }, [project])
 
   const activeInsight = insightTabs.find((tab) => tab.key === activeTab) ?? insightTabs[0] ?? null
-
-  useLayoutEffect(() => {
-    const panel = insightPanelRef.current
-    const tabs = tabsRef.current
-
-    if (!panel || !tabs) {
-      return
+  const demoLinks = useMemo(() => {
+    if (!project) {
+      return []
     }
 
-    const syncHighlightTrack = () => {
-      const activeElement = tabs.querySelector<HTMLButtonElement>('.insight-tab.active')
-
-      if (!activeElement) {
-        panel.style.setProperty('--insight-active-left', '0px')
-        panel.style.setProperty('--insight-active-width', '0px')
-        return
-      }
-
-      const tabsRect = tabs.getBoundingClientRect()
-      const activeRect = activeElement.getBoundingClientRect()
-      panel.style.setProperty('--insight-active-left', `${activeRect.left - tabsRect.left}px`)
-      panel.style.setProperty('--insight-active-width', `${activeRect.width}px`)
+    if (project.demoLinks && project.demoLinks.length > 0) {
+      return project.demoLinks
     }
 
-    syncHighlightTrack()
-
-    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(syncHighlightTrack) : null
-    observer?.observe(tabs)
-    window.addEventListener('resize', syncHighlightTrack)
-
-    return () => {
-      observer?.disconnect()
-      window.removeEventListener('resize', syncHighlightTrack)
-    }
-  }, [activeTab, project?.id, insightTabs.length])
+    return project.demoUrl ? [{ label: project.demoLabel || 'Demo', href: project.demoUrl }] : []
+  }, [project])
 
   return (
     <aside className="project-panel" aria-live="polite" aria-atomic="true">
@@ -97,11 +91,10 @@ export function ProjectPanel({ project }: ProjectPanelProps) {
             <p className="project-theme">Theme: {project.theme}</p>
             <p>{project.summary}</p>
 
-            <div className="insight-panel" ref={insightPanelRef}>
-              <div className="insight-tabs" role="tablist" aria-label="Project insights" ref={tabsRef}>
-                {insightTabs.map((tab, index) => {
+            <div className="insight-panel">
+              <div className="insight-tabs" role="tablist" aria-label="Project insights">
+                {insightTabs.map((tab) => {
                   const isActive = activeTab === tab.key
-                  const restingZ = insightTabs.length - index
 
                   return (
                     <button
@@ -111,7 +104,6 @@ export function ProjectPanel({ project }: ProjectPanelProps) {
                       className={`insight-tab ${isActive ? 'active' : ''}`}
                       aria-selected={isActive}
                       onClick={() => setActiveTab(tab.key)}
-                      style={{ zIndex: isActive ? insightTabs.length + 2 : restingZ }}
                     >
                       {tab.label}
                     </button>
@@ -119,21 +111,30 @@ export function ProjectPanel({ project }: ProjectPanelProps) {
                 })}
               </div>
 
-              <div className="impact-block insight-content">
+              <div className="insight-content">
                 <h3>{activeInsight?.label ?? 'Demo'}</h3>
                 <p>{activeInsight?.content ?? project.demoNote}</p>
-                {activeInsight?.actionHref ? (
-                  <a
-                    className="insight-action"
-                    href={activeInsight.actionHref}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    {activeInsight.actionLabel ?? 'Open'}
-                  </a>
-                ) : null}
-                {activeInsight?.actionLabel && !activeInsight.actionHref ? (
-                  <span className="insight-action-label">{activeInsight.actionLabel}</span>
+                {activeInsight?.key === 'demo' && demoLinks.length > 0 ? (
+                  <div className="insight-hotlinks">
+                    {demoLinks.map((link) => {
+                      const external = isExternalHref(link.href)
+                      const visibleUrl = toVisibleUrl(link.href)
+
+                      return (
+                        <p className="insight-hotlink-row" key={`${link.label}-${link.href}`}>
+                          <span className="insight-hotlink-label">{link.label}:</span>{' '}
+                          <a
+                            className="insight-hotlink"
+                            href={link.href}
+                            target={external ? '_blank' : undefined}
+                            rel={external ? 'noreferrer' : undefined}
+                          >
+                            {visibleUrl}
+                          </a>
+                        </p>
+                      )
+                    })}
+                  </div>
                 ) : null}
               </div>
             </div>

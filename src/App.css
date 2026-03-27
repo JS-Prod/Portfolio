@@ -220,58 +220,75 @@
 
 .insight-panel {
   display: grid;
-  --insight-active-left: 0px;
-  --insight-active-width: 0px;
+  border-radius: 0.95rem;
+  border: 1px solid rgba(155, 204, 255, 0.3);
+  background: linear-gradient(180deg, rgba(17, 34, 54, 0.94), rgba(9, 20, 34, 0.96));
+  box-shadow:
+    inset 0 1px 0 rgba(214, 232, 255, 0.09),
+    0 10px 24px rgba(4, 10, 18, 0.32);
+  overflow: hidden;
 }
 
 .insight-tabs {
-  display: flex;
-  flex-wrap: nowrap;
-  gap: 0;
-  padding: 0 0.4rem;
-  margin-bottom: 0;
-  align-items: flex-end;
-  isolation: isolate;
-  overflow: hidden;
-  position: relative;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.16rem;
+  padding: 0.3rem 0.24rem 0;
+  border-bottom: 1px solid rgba(157, 205, 255, 0.2);
+  background: linear-gradient(180deg, rgba(28, 52, 80, 0.7), rgba(14, 29, 46, 0.52));
+  align-items: end;
 }
 
 .insight-tab {
   position: relative;
-  border-radius: 0.72rem 0.72rem 0 0;
-  border: 1px solid rgba(148, 188, 236, 0.3);
-  border-bottom: none;
-  background: linear-gradient(180deg, rgba(18, 36, 59, 0.9), rgba(11, 22, 37, 0.86));
-  color: rgba(207, 223, 243, 0.88);
-  font-size: 0.67rem;
-  font-weight: 600;
-  letter-spacing: 0.075em;
+  border-radius: 0.5rem 0.5rem 0 0;
+  border: 1px solid transparent;
+  background: transparent;
+  color: rgba(194, 212, 236, 0.82);
+  font-size: 0.585rem;
+  font-weight: 640;
+  letter-spacing: 0.038em;
   text-transform: uppercase;
-  padding: 0.38rem 0.72rem 0.32rem;
+  line-height: 1;
+  min-height: 1.95rem;
+  padding: 0.42rem 0.14rem 0.5rem;
+  text-align: center;
   cursor: pointer;
-  transform: translateY(2px);
-  margin-left: -0.28rem;
-  transition: border-color 160ms ease, color 160ms ease, background 160ms ease, transform 160ms ease;
-}
-
-.insight-tab:first-child {
-  margin-left: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition:
+    border-color 160ms ease,
+    color 160ms ease,
+    background 160ms ease,
+    transform 160ms ease,
+    box-shadow 160ms ease;
 }
 
 .insight-tab:hover {
-  border-color: rgba(195, 223, 255, 0.65);
+  border-color: rgba(172, 209, 251, 0.2);
   color: #ecf4ff;
-  transform: translateY(0);
+  background: rgba(17, 34, 53, 0.36);
+  transform: translateY(-1px);
 }
 
 .insight-tab.active {
-  border-color: rgba(209, 231, 255, 0.88);
-  color: #ecf4ff;
-  background: linear-gradient(180deg, rgba(35, 67, 104, 0.96), rgba(19, 39, 66, 0.92));
-  box-shadow:
-    0 0 0 1px rgba(201, 226, 255, 0.15) inset,
-    0 8px 20px rgba(20, 44, 73, 0.3);
-  transform: translateY(0);
+  border-color: rgba(205, 229, 255, 0.42);
+  border-bottom-color: rgba(12, 25, 42, 0.94);
+  color: #f4f8ff;
+  background: linear-gradient(180deg, rgba(58, 99, 148, 0.42), rgba(17, 36, 58, 0.94));
+  box-shadow: inset 0 1px 0 rgba(220, 238, 255, 0.14);
+}
+
+.insight-tab.active::after {
+  content: '';
+  position: absolute;
+  left: 18%;
+  right: 18%;
+  bottom: 0.12rem;
+  height: 2px;
+  border-radius: 999px;
+  background: rgba(190, 224, 255, 0.82);
 }
 
 .insight-tab:focus-visible {
@@ -280,59 +297,49 @@
 }
 
 .insight-content {
-  border-top-left-radius: 0.5rem;
-  border-top-right-radius: 0.5rem;
-  padding: 0.76rem;
-  margin-top: -1px;
-  position: relative;
+  display: grid;
+  gap: 0.26rem;
+  padding: 0.8rem;
+  background: linear-gradient(180deg, rgba(12, 25, 42, 0.8), rgba(9, 19, 33, 0.92));
 }
 
-.insight-content::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: var(--insight-active-left);
-  width: max(0px, var(--insight-active-width));
-  height: 1px;
-  background: linear-gradient(90deg, rgba(172, 211, 255, 0.08), rgba(214, 235, 255, 0.62), rgba(172, 211, 255, 0.08));
-  box-shadow: 0 0 6px rgba(124, 186, 255, 0.3);
-  pointer-events: none;
-}
-
-.insight-action {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin-top: 0.4rem;
-  border-radius: 999px;
-  border: 1px solid rgba(176, 214, 255, 0.5);
-  background: rgba(14, 34, 56, 0.86);
-  color: #ecf4ff;
+.insight-content h3 {
   font-size: 0.72rem;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  text-decoration: none;
-  padding: 0.26rem 0.62rem;
-  transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+  color: #8f9fb8;
 }
 
-.insight-action:hover {
-  border-color: rgba(197, 227, 255, 0.9);
-  background: rgba(17, 40, 66, 0.95);
+.insight-hotlinks {
+  display: grid;
+  gap: 0.32rem;
+  margin-top: 0.46rem;
 }
 
-.insight-action:focus-visible {
+.insight-hotlink-row {
+  font-size: 0.73rem;
+  color: #b6c7dd;
+}
+
+.insight-hotlink-label {
+  color: #93abca;
+}
+
+.insight-hotlink {
+  color: #b8ddff;
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.14em;
+  overflow-wrap: anywhere;
+}
+
+.insight-hotlink:hover {
+  color: #e6f3ff;
+}
+
+.insight-hotlink:focus-visible {
   outline: 2px solid rgba(163, 207, 255, 0.72);
   outline-offset: 2px;
-}
-
-.insight-action-label {
-  display: inline-flex;
-  margin-top: 0.4rem;
-  font-size: 0.7rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: #9fd2ff;
 }
 
 .stack-list {
@@ -468,6 +475,10 @@
   .project-panel {
     max-height: 44vh;
     overflow: auto;
+  }
+
+  .insight-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .project-rail {

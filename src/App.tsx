@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { TransitionEvent } from 'react'
 import { useReducedMotion } from 'framer-motion'
 
@@ -7,8 +7,17 @@ import { ConstellationScene } from './components/ConstellationScene'
 import { ProjectPanel } from './components/ProjectPanel'
 import { projects } from './data/projects'
 
+function getProjectIdFromHash(): string | null {
+  if (typeof window === 'undefined') {
+    return null
+  }
+
+  const hashId = window.location.hash.replace(/^#/, '')
+  return projects.some((project) => project.id === hashId) ? hashId : null
+}
+
 function App() {
-  const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(() => getProjectIdFromHash())
   const [sceneLoading, setSceneLoading] = useState(true)
   const [loaderVisible, setLoaderVisible] = useState(true)
   const reduceMotion = useReducedMotion() ?? false
@@ -31,6 +40,39 @@ function App() {
       setLoaderVisible(false)
     }
   }, [sceneLoading])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+
+    const onHashChange = () => {
+      setActiveProjectId(getProjectIdFromHash())
+    }
+
+    window.addEventListener('hashchange', onHashChange)
+    return () => {
+      window.removeEventListener('hashchange', onHashChange)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+
+    const nextHash = activeProjectId ? `#${activeProjectId}` : ''
+
+    if (window.location.hash === nextHash) {
+      return
+    }
+
+    window.history.replaceState(
+      null,
+      '',
+      `${window.location.pathname}${window.location.search}${nextHash}`
+    )
+  }, [activeProjectId])
 
   return (
     <div className="portfolio-shell">

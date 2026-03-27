@@ -1,3 +1,8 @@
+export type ProjectDemoLink = {
+  label: string
+  href: string
+}
+
 export type Project = {
   id: string
   title: string
@@ -7,6 +12,7 @@ export type Project = {
   demoLabel: string
   demoNote: string
   demoUrl?: string
+  demoLinks?: ProjectDemoLink[]
   contribution: string
   approach: string
   impact: string
@@ -49,6 +55,7 @@ export const projects: Project[] = [
     demoNote:
       'Production workflow demo with real-time call handling, transcript flow, and backend orchestration for voice-first customer interactions.',
     demoUrl: 'https://wirmi.net/voyce',
+    demoLinks: [{ label: 'Live Product', href: 'https://wirmi.net/voyce' }],
     contribution:
       'Built core frontend and backend layers for live voice sessions, including call lifecycle handling, transcript processing, and operational reliability controls.',
     approach:
@@ -70,6 +77,9 @@ export const projects: Project[] = [
     demoLabel: 'Playable Build',
     demoNote:
       'Published mobile title featuring short-session memory gameplay with escalating challenge and progression feedback loops.',
+    demoLinks: [
+      { label: 'Google Play Search', href: 'https://play.google.com/store/search?q=Tone%20Tap&c=apps' },
+    ],
     contribution:
       'Implemented the React Native gameplay client and the backend progression/scoring services, coordinating both sides of the release.',
     approach:
