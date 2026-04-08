@@ -4637,7 +4637,7 @@ function NeutralStarField({
       midGroupRef.current.visible = revealBlend > 0.001;
       midGroupRef.current.rotation.y = reducedMotion
         ? 0
-        : -elapsed * 0.0054 + 0.22;
+        : elapsed * 0.0054 + 0.22;
       midGroupRef.current.rotation.x = reducedMotion
         ? 0
         : Math.sin(elapsed * 0.022) * 0.014;
@@ -4647,7 +4647,7 @@ function NeutralStarField({
       overlayGroupRef.current.visible = revealBlend > 0.001;
       overlayGroupRef.current.rotation.y = reducedMotion
         ? 0
-        : -elapsed * 0.0048 + 0.4;
+        : elapsed * 0.0048 + 0.4;
       overlayGroupRef.current.rotation.x = reducedMotion
         ? 0
         : Math.cos(elapsed * 0.028) * 0.01;
