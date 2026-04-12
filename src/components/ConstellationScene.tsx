@@ -36,6 +36,10 @@ type ConstellationSceneProps = {
   introUnlocked?: boolean;
 };
 
+type SceneContentProps = ConstellationSceneProps & {
+  isMobileViewport: boolean;
+};
+
 type Connection = {
   id: string;
   points: [Vector3, Vector3];
@@ -83,6 +87,7 @@ type CameraRigProps = {
   activeProject: Project | null;
   controlsRef: RefObject<OrbitControlsImpl | null>;
   reducedMotion: boolean;
+  isMobileViewport: boolean;
   introUnlocked: boolean;
   onTransitionHalfway?: () => void;
   onTransitionProgress?: (progress: number) => void;
@@ -188,6 +193,7 @@ type NeutralStarInstances = {
 type HeroWorldProps = {
   project: Project;
   reducedMotion: boolean;
+  isMobileViewport: boolean;
   presenceTarget: number;
   collapseParticlesOnFadeOut: boolean;
   prewarmActive: boolean;
@@ -196,6 +202,7 @@ type HeroWorldProps = {
 type CinematicBloomProps = {
   project: Project | null;
   reducedMotion: boolean;
+  isMobileViewport: boolean;
 };
 
 const CONNECTION_DISTANCE = 6.2;
@@ -212,11 +219,46 @@ const HERO_SHELL_WIREFRAME_VISIBILITY = 1.1;
 const ENABLE_SCENE_FOG = false;
 const ENABLE_CORE_DUST_FOG = false;
 const ENABLE_CORE_STAR_BLOCKER = false;
+const MOBILE_BREAKPOINT_PX = 820;
 const SCENE_EXPOSURE = 1.62;
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 const X_AXIS = new THREE.Vector3(1, 0, 0);
 const WHITE = new THREE.Color("#ffffff");
 const BLACK = new THREE.Color("#000000");
+
+function useMobileViewport(maxWidth = MOBILE_BREAKPOINT_PX) {
+  const query = `(max-width: ${maxWidth}px)`;
+  const [isMobileViewport, setIsMobileViewport] = useState(() =>
+    typeof window !== "undefined" ? window.matchMedia(query).matches : false
+  );
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const media = window.matchMedia(query);
+    const update = () => {
+      setIsMobileViewport(media.matches);
+    };
+
+    update();
+
+    if (typeof media.addEventListener === "function") {
+      media.addEventListener("change", update);
+      return () => {
+        media.removeEventListener("change", update);
+      };
+    }
+
+    media.addListener(update);
+    return () => {
+      media.removeListener(update);
+    };
+  }, [query]);
+
+  return isMobileViewport;
+}
 const CORE_VERTEX_SHADER = `
 varying vec3 vNormal;
 varying vec3 vWorldPos;
@@ -2248,6 +2290,7 @@ function ProjectNode({
 function HeroWorld({
   project,
   reducedMotion,
+  isMobileViewport,
   presenceTarget,
   collapseParticlesOnFadeOut,
   prewarmActive,
@@ -2577,6 +2620,11 @@ function HeroWorld({
     }),
     [accentColor, secondaryColor, style.swarmSize, gl]
   );
+  const mobileFilamentIntensityBoost = isMobileViewport ? 1.28 : 1;
+  const mobileFilamentOpacityBoost = isMobileViewport ? 1.52 : 1;
+  const mobileFilamentEmissionBoost = isMobileViewport ? 1.24 : 1;
+  const mobileSwarmIntensityBoost = isMobileViewport ? 1.1 : 1;
+  const mobileSwarmOpacityBoost = isMobileViewport ? 1.14 : 1;
 
   useFrame(({ clock, camera }, delta) => {
     const elapsed = clock.getElapsedTime();
@@ -2906,11 +2954,24 @@ function HeroWorld({
         .copy(secondaryColor)
         .lerp(accentColor, 0.2);
       streamRibbonMaterialRef.current.uniforms.uIntensity.value =
-        showLegacySwarmOnly ? 0 : intensity * silhouetteProfile.particles;
+        showLegacySwarmOnly
+          ? 0
+          : intensity *
+            silhouetteProfile.particles *
+            mobileFilamentIntensityBoost;
       streamRibbonMaterialRef.current.uniforms.uOpacity.value =
-        showLegacySwarmOnly ? 0 : (0.045 + intensity * 0.14) * intensity;
+        showLegacySwarmOnly
+          ? 0
+          : THREE.MathUtils.clamp(
+              (0.055 + intensity * 0.2) *
+                intensity *
+                mobileFilamentOpacityBoost,
+              0,
+              0.58
+            );
       streamRibbonMaterialRef.current.uniforms.uEmission.value =
-        etherealFilaments.config.emissionIntensity;
+        etherealFilaments.config.emissionIntensity *
+        mobileFilamentEmissionBoost;
       streamRibbonMaterialRef.current.uniforms.uNoiseSpeed.value =
         etherealFilaments.config.noiseSpeed;
     }
@@ -2921,9 +2982,9 @@ function HeroWorld({
         .copy(accentColor)
         .lerp(secondaryColor, 0.08);
       streamSwarmMaterialRef.current.uniforms.uIntensity.value =
-        (0.28 + intensity * 0.86) * intensity;
+        (0.28 + intensity * 0.86) * intensity * mobileSwarmIntensityBoost;
       streamSwarmMaterialRef.current.uniforms.uOpacity.value =
-        (0.18 + intensity * 0.34) * intensity;
+        (0.18 + intensity * 0.34) * intensity * mobileSwarmOpacityBoost;
       streamSwarmMaterialRef.current.uniforms.uPixelRatio.value = Math.min(
         gl.getPixelRatio(),
         2
@@ -3582,7 +3643,11 @@ function HeroWorld({
   );
 }
 
-function CinematicBloom({ project, reducedMotion }: CinematicBloomProps) {
+function CinematicBloom({
+  project,
+  reducedMotion,
+  isMobileViewport,
+}: CinematicBloomProps) {
   const { gl, scene, camera, size } = useThree();
   const composerRef = useRef<EffectComposer | null>(null);
   const bloomRef = useRef<UnrealBloomPass | null>(null);
@@ -3591,9 +3656,12 @@ function CinematicBloom({ project, reducedMotion }: CinematicBloomProps) {
   const filmRef = useRef<FilmPass | null>(null);
 
   useLayoutEffect(() => {
+    const postFxScale = isMobileViewport ? 0.96 : 1;
+    const targetWidth = Math.max(1, Math.floor(size.width * postFxScale));
+    const targetHeight = Math.max(1, Math.floor(size.height * postFxScale));
     const renderPass = new RenderPass(scene, camera);
     const bloomPass = new UnrealBloomPass(
-      new THREE.Vector2(size.width, size.height),
+      new THREE.Vector2(targetWidth, targetHeight),
       0.66,
       0.5,
       0.41
@@ -3602,15 +3670,18 @@ function CinematicBloom({ project, reducedMotion }: CinematicBloomProps) {
     const vignettePass = new ShaderPass(VignetteShader);
     const filmPass = new FilmPass(0.008, 0, 0, false);
     const composerTarget = new THREE.WebGLRenderTarget(
-      size.width,
-      size.height,
+      targetWidth,
+      targetHeight,
       {
         depthBuffer: true,
         stencilBuffer: true,
       }
     );
     if ("samples" in composerTarget) {
-      composerTarget.samples = Math.min(4, gl.capabilities.maxSamples);
+      composerTarget.samples = Math.min(
+        isMobileViewport ? 2 : 4,
+        gl.capabilities.maxSamples
+      );
     }
 
     const rgbUniforms = rgbShiftPass.uniforms as Record<
@@ -3638,9 +3709,13 @@ function CinematicBloom({ project, reducedMotion }: CinematicBloomProps) {
     const composer = new EffectComposer(gl, composerTarget);
     composer.addPass(renderPass);
     composer.addPass(bloomPass);
-    composer.addPass(rgbShiftPass);
+    if (!isMobileViewport) {
+      composer.addPass(rgbShiftPass);
+    }
     composer.addPass(vignettePass);
-    composer.addPass(filmPass);
+    if (!isMobileViewport) {
+      composer.addPass(filmPass);
+    }
 
     composerRef.current = composer;
     bloomRef.current = bloomPass;
@@ -3657,7 +3732,7 @@ function CinematicBloom({ project, reducedMotion }: CinematicBloomProps) {
       vignetteRef.current = null;
       filmRef.current = null;
     };
-  }, [camera, gl, scene, size.height, size.width]);
+  }, [camera, gl, isMobileViewport, scene, size.height, size.width]);
 
   useLayoutEffect(() => {
     const bloomPass = bloomRef.current;
@@ -3668,6 +3743,13 @@ function CinematicBloom({ project, reducedMotion }: CinematicBloomProps) {
     if (!bloomPass || !rgbShiftPass || !vignettePass || !filmPass) {
       return;
     }
+
+    const bloomStrengthScale = isMobileViewport ? 0.94 : 1;
+    const bloomRadiusScale = isMobileViewport ? 0.76 : 1;
+    const bloomThresholdLift = isMobileViewport ? 0.03 : 0;
+    const rgbIntensityScale = isMobileViewport ? 0.72 : 1;
+    const filmNoiseScale = isMobileViewport ? 0.5 : 1;
+    const vignetteDarknessOffset = isMobileViewport ? -0.2 : 0;
 
     const rgbUniforms = rgbShiftPass.uniforms as Record<
       string,
@@ -3683,35 +3765,39 @@ function CinematicBloom({ project, reducedMotion }: CinematicBloomProps) {
     >;
 
     if (!project) {
-      bloomPass.strength = reducedMotion ? 0.46 : 0.58;
-      bloomPass.radius = 0.4;
-      bloomPass.threshold = 0.48;
-      rgbUniforms.amount.value = 0.00008;
-      vignetteUniforms.darkness.value = 0.9;
-      filmUniforms.nIntensity.value = reducedMotion ? 0.0006 : 0.0016;
+      bloomPass.strength = (reducedMotion ? 0.46 : 0.58) * bloomStrengthScale;
+      bloomPass.radius = 0.4 * bloomRadiusScale;
+      bloomPass.threshold = 0.48 + bloomThresholdLift;
+      rgbUniforms.amount.value = 0.00008 * rgbIntensityScale;
+      vignetteUniforms.darkness.value = 0.9 + vignetteDarknessOffset;
+      filmUniforms.nIntensity.value =
+        (reducedMotion ? 0.0006 : 0.0016) * filmNoiseScale;
     } else if (project.id === "gpgpu-particles") {
-      bloomPass.strength = reducedMotion ? 0.54 : 0.68;
-      bloomPass.radius = 0.52;
-      bloomPass.threshold = 0.41;
-      rgbUniforms.amount.value = 0.00014;
-      vignetteUniforms.darkness.value = 1.04;
-      filmUniforms.nIntensity.value = reducedMotion ? 0.0015 : 0.0038;
+      bloomPass.strength = (reducedMotion ? 0.54 : 0.68) * bloomStrengthScale;
+      bloomPass.radius = 0.52 * bloomRadiusScale;
+      bloomPass.threshold = 0.41 + bloomThresholdLift;
+      rgbUniforms.amount.value = 0.00014 * rgbIntensityScale;
+      vignetteUniforms.darkness.value = 1.04 + vignetteDarknessOffset;
+      filmUniforms.nIntensity.value =
+        (reducedMotion ? 0.0015 : 0.0038) * filmNoiseScale;
     } else if (project.id === "voyce") {
-      bloomPass.strength = reducedMotion ? 0.48 : 0.6;
-      bloomPass.radius = 0.48;
-      bloomPass.threshold = 0.43;
-      rgbUniforms.amount.value = 0.00012;
-      vignetteUniforms.darkness.value = 1.04;
-      filmUniforms.nIntensity.value = reducedMotion ? 0.0014 : 0.0034;
+      bloomPass.strength = (reducedMotion ? 0.48 : 0.6) * bloomStrengthScale;
+      bloomPass.radius = 0.48 * bloomRadiusScale;
+      bloomPass.threshold = 0.43 + bloomThresholdLift;
+      rgbUniforms.amount.value = 0.00012 * rgbIntensityScale;
+      vignetteUniforms.darkness.value = 1.04 + vignetteDarknessOffset;
+      filmUniforms.nIntensity.value =
+        (reducedMotion ? 0.0014 : 0.0034) * filmNoiseScale;
     } else {
-      bloomPass.strength = reducedMotion ? 0.52 : 0.64;
-      bloomPass.radius = 0.5;
-      bloomPass.threshold = 0.42;
-      rgbUniforms.amount.value = 0.00013;
-      vignetteUniforms.darkness.value = 1.05;
-      filmUniforms.nIntensity.value = reducedMotion ? 0.0015 : 0.0036;
+      bloomPass.strength = (reducedMotion ? 0.52 : 0.64) * bloomStrengthScale;
+      bloomPass.radius = 0.5 * bloomRadiusScale;
+      bloomPass.threshold = 0.42 + bloomThresholdLift;
+      rgbUniforms.amount.value = 0.00013 * rgbIntensityScale;
+      vignetteUniforms.darkness.value = 1.05 + vignetteDarknessOffset;
+      filmUniforms.nIntensity.value =
+        (reducedMotion ? 0.0015 : 0.0036) * filmNoiseScale;
     }
-  }, [project, reducedMotion]);
+  }, [isMobileViewport, project, reducedMotion]);
 
   useFrame(({ clock }, delta) => {
     const elapsed = clock.getElapsedTime();
@@ -3749,6 +3835,7 @@ function CameraRig({
   activeProject,
   controlsRef,
   reducedMotion,
+  isMobileViewport,
   introUnlocked,
   onTransitionHalfway,
   onTransitionProgress,
@@ -3888,7 +3975,13 @@ function CameraRig({
     const towardOthers = centroid.clone().sub(active);
 
     if (isNeutral) {
-      towardOthers.set(0.18, -0.08, -0.98).normalize();
+      towardOthers
+        .set(
+          isMobileViewport ? 0.04 : 0.18,
+          isMobileViewport ? -0.03 : -0.08,
+          -0.98
+        )
+        .normalize();
     } else {
       if (towardOthers.lengthSq() < 0.0001) {
         towardOthers.set(1, 0.2, 0.6);
@@ -3901,8 +3994,8 @@ function CameraRig({
     let verticalBoost = 0;
 
     if (isNeutral) {
-      distanceScale = 1.22;
-      verticalBoost = 0.14;
+      distanceScale = isMobileViewport ? 1.44 : 1.22;
+      verticalBoost = isMobileViewport ? 0.2 : 0.14;
     } else if (selectedProjectId === "voyce") {
       yawOffset = 0.46;
       distanceScale = 0.9;
@@ -3929,7 +4022,9 @@ function CameraRig({
     side.normalize();
 
     const desiredFill = isNeutral
-      ? size.width < 900
+      ? isMobileViewport
+        ? 0.5
+        : size.width < 900
         ? 0.66
         : 0.72
       : size.width < 900
@@ -3940,18 +4035,37 @@ function CameraRig({
     const spreadAllowance = Math.min(1.2, maxDistanceToOthers * 0.18);
     const distance = THREE.MathUtils.clamp(
       (fillDistance + spreadAllowance) * distanceScale,
-      isNeutral ? (size.width < 900 ? 5.0 : 5.8) : size.width < 900 ? 3.8 : 4.5,
-      isNeutral ? (size.width < 900 ? 7.4 : 8.6) : size.width < 900 ? 5.8 : 6.8
+      isNeutral
+        ? isMobileViewport
+          ? 8.8
+          : size.width < 900
+          ? 5.0
+          : 5.8
+        : size.width < 900
+        ? 3.8
+        : 4.5,
+      isNeutral
+        ? isMobileViewport
+          ? 13.4
+          : size.width < 900
+          ? 7.4
+          : 8.6
+        : size.width < 900
+        ? 5.8
+        : 6.8
     );
 
     const sideAmount = isNeutral
-      ? size.width < 900
+      ? isMobileViewport
+        ? 0.04
+        : size.width < 900
         ? 0.22
         : 0.28
       : size.width < 900
       ? 0.4
       : 0.52 + maxDistanceToOthers * 0.12;
-    const verticalLift = (size.width < 900 ? 0.42 : 0.6) + verticalBoost;
+    const verticalLift =
+      (isMobileViewport ? 0.56 : size.width < 900 ? 0.42 : 0.6) + verticalBoost;
 
     const target = active.clone();
     const baseCameraPosition = active
@@ -3992,14 +4106,42 @@ function CameraRig({
       .crossVectors(cameraRight, viewDirection)
       .normalize();
 
-    let desiredNdcX = isNeutral ? -0.01 : -0.03;
-    const desiredNdcY = isNeutral
-      ? size.width < 900
+    let desiredNdcX = isNeutral
+      ? isMobileViewport
+        ? 0
+        : -0.01
+      : isMobileViewport
+      ? -0.004
+      : -0.03;
+    let desiredNdcY = isNeutral
+      ? isMobileViewport
+        ? 0.24
+        : size.width < 900
         ? 0
         : 0.04
+      : isMobileViewport
+      ? 0.28
       : size.width < 900
       ? -0.02
       : 0.02;
+
+    if (isMobileViewport) {
+      const panelElement = document.querySelector(
+        ".hud-panel"
+      ) as HTMLElement | null;
+
+      if (panelElement) {
+        const panelRect = panelElement.getBoundingClientRect();
+        const topInset = Math.max(56, size.height * 0.07);
+        const freeBottom = Math.max(topInset + 120, panelRect.top - 16);
+        const freeCenterY = (topInset + freeBottom) * 0.5;
+        const freeCenterNdcY = 1 - (freeCenterY / Math.max(size.height, 1)) * 2;
+
+        desiredNdcY = isNeutral
+          ? THREE.MathUtils.clamp(freeCenterNdcY - 0.04, 0.16, 0.42)
+          : THREE.MathUtils.clamp(freeCenterNdcY + 0.04, 0.2, 0.5);
+      }
+    }
 
     if (size.width >= 900) {
       const panelElement = document.querySelector(
@@ -4046,9 +4188,13 @@ function CameraRig({
       introSide.normalize();
       introSwayAxisRef.current.copy(introSide);
 
-      const introDistance = size.width < 900 ? 1.9 : 2.6;
-      const introSideOffset = size.width < 900 ? -0.26 : -0.44;
-      const introLift = size.width < 900 ? 0.3 : 0.44;
+      const introDistance = isMobileViewport ? 1.6 : size.width < 900 ? 1.9 : 2.6;
+      const introSideOffset = isMobileViewport
+        ? -0.16
+        : size.width < 900
+        ? -0.26
+        : -0.44;
+      const introLift = isMobileViewport ? 0.24 : size.width < 900 ? 0.3 : 0.44;
 
       startCameraRef.current
         .copy(cameraPosition)
@@ -4108,7 +4254,11 @@ function CameraRig({
 
     camera.position.copy(startCameraRef.current);
     if (isInitialNeutralTransitionRef.current) {
-      const introSwayAtStart = size.width < 900 ? -0.022 : -0.036;
+      const introSwayAtStart = isMobileViewport
+        ? -0.012
+        : size.width < 900
+        ? -0.022
+        : -0.036;
       camera.position.addScaledVector(
         introSwayAxisRef.current,
         introSwayAtStart
@@ -4139,6 +4289,7 @@ function CameraRig({
     projects,
     size.width,
     size.height,
+    isMobileViewport,
     camera,
     controlsRef,
     onTransitionProgress,
@@ -4172,7 +4323,11 @@ function CameraRig({
           1
         );
         const orbitBlend = easeInOutCubic(orbitResumeRef.current);
-        const orbitSpeed = size.width < 900 ? 0.08 : 0.055;
+        const orbitSpeed = isMobileViewport
+          ? 0.062
+          : size.width < 900
+          ? 0.08
+          : 0.055;
         const theta = frameDelta * orbitSpeed * orbitBlend;
 
         orbitCameraOffsetRef.current
@@ -4213,7 +4368,11 @@ function CameraRig({
       onTransitionProgress?.(0);
       controls.target.copy(startTargetRef.current);
       camera.position.copy(startCameraRef.current);
-      const introSwayAtStart = size.width < 900 ? -0.022 : -0.036;
+      const introSwayAtStart = isMobileViewport
+        ? -0.012
+        : size.width < 900
+        ? -0.022
+        : -0.036;
       camera.position.addScaledVector(
         introSwayAxisRef.current,
         introSwayAtStart
@@ -4247,12 +4406,16 @@ function CameraRig({
     const arcLift = reducedMotion
       ? 0
       : transitionMode === "neutral-intro"
-      ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.075 : 0.15)
+      ? Math.sin(Math.PI * eased) *
+        (isMobileViewport ? 0.048 : size.width < 900 ? 0.075 : 0.15)
       : transitionMode === "neutral-to-focus"
-      ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.085 : 0.21)
+      ? Math.sin(Math.PI * eased) *
+        (isMobileViewport ? 0.062 : size.width < 900 ? 0.085 : 0.21)
       : transitionMode === "focus-to-neutral"
-      ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.06 : 0.15)
-      : Math.sin(Math.PI * eased) * (size.width < 900 ? 0.1 : 0.3);
+      ? Math.sin(Math.PI * eased) *
+        (isMobileViewport ? 0.046 : size.width < 900 ? 0.06 : 0.15)
+      : Math.sin(Math.PI * eased) *
+        (isMobileViewport ? 0.07 : size.width < 900 ? 0.1 : 0.3);
 
     transitionTargetRef.current.lerpVectors(
       startTargetRef.current,
@@ -4302,18 +4465,23 @@ function CameraRig({
     const cinematicDolly = reducedMotion
       ? 0
       : transitionMode === "neutral-intro"
-      ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.18 : 0.32)
+      ? Math.sin(Math.PI * eased) *
+        (isMobileViewport ? 0.1 : size.width < 900 ? 0.18 : 0.32)
       : transitionMode === "neutral-to-focus"
-      ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.36 : 0.82)
+      ? Math.sin(Math.PI * eased) *
+        (isMobileViewport ? 0.22 : size.width < 900 ? 0.36 : 0.82)
       : transitionMode === "focus-to-neutral"
-      ? Math.sin(Math.PI * eased) * (size.width < 900 ? 0.28 : 0.64)
-      : Math.sin(Math.PI * eased) * (size.width < 900 ? 0.54 : 1.14);
+      ? Math.sin(Math.PI * eased) *
+        (isMobileViewport ? 0.18 : size.width < 900 ? 0.28 : 0.64)
+      : Math.sin(Math.PI * eased) *
+        (isMobileViewport ? 0.3 : size.width < 900 ? 0.54 : 1.14);
 
     camera.position
       .copy(transitionTargetRef.current)
       .addScaledVector(transitionDirectionRef.current, radius + cinematicDolly);
     if (transitionMode === "neutral-intro") {
-      const introSway = (1 - eased) * (size.width < 900 ? -0.022 : -0.036);
+      const introSway = (1 - eased) *
+        (isMobileViewport ? -0.012 : size.width < 900 ? -0.022 : -0.036);
       camera.position.addScaledVector(introSwayAxisRef.current, introSway);
     }
     camera.position.addScaledVector(WORLD_UP, arcLift);
@@ -4504,9 +4672,11 @@ function CinematicLights({
 
 function NeutralStarField({
   reducedMotion,
+  isMobileViewport,
   bootstrapProgressRef,
 }: {
   reducedMotion: boolean;
+  isMobileViewport: boolean;
   bootstrapProgressRef?: RefObject<number>;
 }) {
   const baseGroupRef = useRef<THREE.Group>(null);
@@ -4520,39 +4690,41 @@ function NeutralStarField({
   const nebulaNearMaterialRef = useRef<THREE.ShaderMaterial>(null);
   const nebulaFarMaterialRef = useRef<THREE.ShaderMaterial>(null);
   const scratchObject = useMemo(() => new THREE.Object3D(), []);
+  const starDensity = isMobileViewport ? 0.58 : 1;
+  const starSegments = isMobileViewport ? 8 : 10;
 
   const neutralBaseStars = useMemo(
     () =>
       createNeutralStarInstances(
         "neutral-stars-base",
-        2200,
+        Math.round(2200 * starDensity),
         122,
         28,
         [0.026, 0.062]
       ),
-    []
+    [starDensity]
   );
   const neutralMidStars = useMemo(
     () =>
       createNeutralStarInstances(
         "neutral-stars-mid",
-        1340,
+        Math.round(1340 * starDensity),
         108,
         22,
         [0.022, 0.052]
       ),
-    []
+    [starDensity]
   );
   const neutralOverlayStars = useMemo(
     () =>
       createNeutralStarInstances(
         "neutral-stars-overlay",
-        890,
+        Math.round(890 * starDensity),
         94,
         18,
         [0.038, 0.085]
       ),
-    []
+    [starDensity]
   );
   const nebulaNearUniforms = useMemo(
     () => ({
@@ -4719,7 +4891,7 @@ function NeutralStarField({
           renderOrder={-30}
           frustumCulled={false}
         >
-          <sphereGeometry args={[2, 10, 10]} />
+          <sphereGeometry args={[2, starSegments, starSegments]} />
           <meshBasicMaterial
             color="#d7e4f4"
             transparent={false}
@@ -4750,7 +4922,7 @@ function NeutralStarField({
           renderOrder={-31}
           frustumCulled={false}
         >
-          <sphereGeometry args={[2, 10, 10]} />
+          <sphereGeometry args={[2, starSegments, starSegments]} />
           <meshBasicMaterial
             color="#d9e5f5"
             transparent={false}
@@ -4781,7 +4953,7 @@ function NeutralStarField({
           renderOrder={-29}
           frustumCulled={false}
         >
-          <sphereGeometry args={[2, 10, 10]} />
+          <sphereGeometry args={[2, starSegments, starSegments]} />
           <meshBasicMaterial
             color="#e5eefb"
             transparent={false}
@@ -5085,9 +5257,10 @@ function SceneContent({
   activeProjectId,
   onSelectProject,
   reducedMotion,
+  isMobileViewport,
   onReady,
   introUnlocked = true,
-}: ConstellationSceneProps) {
+}: SceneContentProps) {
   const { gl, scene, camera } = useThree();
   const [hoveredProjectId, setHoveredProjectId] = useState<string | null>(null);
   const [visualActiveProjectId, setVisualActiveProjectId] = useState<
@@ -6146,6 +6319,7 @@ function SceneContent({
                 key={`hero-${project.id}`}
                 project={project}
                 reducedMotion={reducedMotion}
+                isMobileViewport={isMobileViewport}
                 presenceTarget={presenceTarget}
                 collapseParticlesOnFadeOut={isOutgoing}
                 prewarmActive={heroPrewarmActive}
@@ -6173,6 +6347,7 @@ function SceneContent({
 
       <NeutralStarField
         reducedMotion={reducedMotion}
+        isMobileViewport={isMobileViewport}
         bootstrapProgressRef={bootstrapProgressRef}
       />
 
@@ -6182,9 +6357,9 @@ function SceneContent({
         enableZoom
         enableRotate
         enableDamping
-        dampingFactor={0.09}
-        rotateSpeed={0.52}
-        zoomSpeed={0.62}
+        dampingFactor={isMobileViewport ? 0.11 : 0.09}
+        rotateSpeed={isMobileViewport ? 0.44 : 0.52}
+        zoomSpeed={isMobileViewport ? 0.52 : 0.62}
         minDistance={2.6}
         maxDistance={14}
         minPolarAngle={0.42}
@@ -6197,6 +6372,7 @@ function SceneContent({
         activeProject={activeProject}
         controlsRef={controlsRef}
         reducedMotion={reducedMotion}
+        isMobileViewport={isMobileViewport}
         introUnlocked={introUnlocked}
         onTransitionProgress={handleTransitionProgress}
       />
@@ -6204,18 +6380,25 @@ function SceneContent({
       <CinematicBloom
         project={visualActiveProject}
         reducedMotion={reducedMotion}
+        isMobileViewport={isMobileViewport}
       />
     </>
   );
 }
 
 export function ConstellationScene(props: ConstellationSceneProps) {
+  const isMobileViewport = useMobileViewport();
+  const dpr: [number, number] = isMobileViewport ? [1.2, 1.9] : [1, 2];
+  const toneMappingExposure = isMobileViewport
+    ? SCENE_EXPOSURE * 1.08
+    : SCENE_EXPOSURE;
+
   return (
     <Canvas
       className="constellation-canvas"
       style={{ position: "absolute", inset: 0 }}
       camera={{ position: [0, 1.8, 8.4], fov: 54, near: 0.1, far: 150 }}
-      dpr={[1, 2]}
+      dpr={dpr}
       gl={{
         antialias: true,
         alpha: false,
@@ -6224,11 +6407,11 @@ export function ConstellationScene(props: ConstellationSceneProps) {
       }}
       onCreated={({ gl }) => {
         gl.toneMapping = THREE.ACESFilmicToneMapping;
-        gl.toneMappingExposure = SCENE_EXPOSURE;
+        gl.toneMappingExposure = toneMappingExposure;
       }}
       fallback={<div className="canvas-fallback">WebGL unavailable.</div>}
     >
-      <SceneContent {...props} />
+      <SceneContent {...props} isMobileViewport={isMobileViewport} />
     </Canvas>
   );
 }

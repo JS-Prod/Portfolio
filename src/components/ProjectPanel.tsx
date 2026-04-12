@@ -81,7 +81,11 @@ export function ProjectPanel({ project }: ProjectPanelProps) {
   }, [project]);
 
   return (
-    <aside className="project-panel" aria-live="polite" aria-atomic="true">
+    <aside
+      className={`project-panel ${project ? "is-project" : "is-neutral"}`}
+      aria-live="polite"
+      aria-atomic="true"
+    >
       <article className="project-card">
         {project ? (
           <>
@@ -91,7 +95,7 @@ export function ProjectPanel({ project }: ProjectPanelProps) {
             </div>
 
             <h2>{project.title}</h2>
-            <p>{project.summary}</p>
+            <p className="project-summary">{project.summary}</p>
 
             <div className="insight-panel">
               <div
@@ -119,7 +123,9 @@ export function ProjectPanel({ project }: ProjectPanelProps) {
 
               <div className="insight-content">
                 <h3>{activeInsight?.label ?? "Demo"}</h3>
-                <p>{activeInsight?.content ?? project.demoNote}</p>
+                <p className="insight-body">
+                  {activeInsight?.content ?? project.demoNote}
+                </p>
                 {activeInsight?.key === "demo" && demoLinks.length > 0 ? (
                   <div className="insight-hotlinks">
                     {demoLinks.map((link) => {
@@ -159,7 +165,13 @@ export function ProjectPanel({ project }: ProjectPanelProps) {
         ) : (
           <>
             <h2>Constellation Overview</h2>
-            <p>Select a project node to learn more about it.</p>
+            <p className="neutral-summary">
+              Select a project node to learn more about it.
+            </p>
+            <p className="neutral-tip-inline">
+              Tap a badge below to focus a project. Use the ↑ button to return
+              here.
+            </p>
             <div className="impact-block">
               <h3>Tip</h3>
               <p>
