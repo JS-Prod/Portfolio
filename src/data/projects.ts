@@ -62,7 +62,7 @@ export const projects: Project[] = [
       "A production voice-agent platform for business phone operations. It is currently tuned for Allied Medical, but the platform is designed so it can be adapted quickly for other industries.",
     demoLabel: "Open Voyce",
     demoNote:
-      "Live product with the real client workflow: customer onboarding, agent customization, and real-time call orchestration.",
+      "Live product with a real client workflow: customer onboarding, agent customization, and real-time call orchestration.",
     demoUrl: "https://wirmi.net/voyce",
     demoLinks: [{ label: "Live Product", href: "https://wirmi.net/voyce" }],
     contribution:
